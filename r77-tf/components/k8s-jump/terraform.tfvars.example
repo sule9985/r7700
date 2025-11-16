@@ -1,0 +1,43 @@
+# ============================================================================
+# Proxmox Provider Configuration
+# ============================================================================
+# Copy this file to terraform.tfvars and fill in your actual values
+# OR use environment variables (recommended):
+#   export TF_VAR_proxmox_api_url="https://proxmox:8006"
+#   export TF_VAR_proxmox_api_token_id="user@pam!terraform=secret"
+#   export TF_VAR_proxmox_tls_insecure=true
+
+proxmox_api_url        = "https://192.168.100.100:8006"
+proxmox_api_token_id   = "user@pam!terraform=your-secret-token-here"
+proxmox_tls_insecure   = true
+
+# ============================================================================
+# Proxmox Node Configuration
+# ============================================================================
+proxmox_node_name = "pve"
+storage_name      = "local-zfs"
+
+# ============================================================================
+# Template Configuration
+# ============================================================================
+template_id = 998  # Debian 13 template VMID
+
+# ============================================================================
+# Jump Server Configuration
+# ============================================================================
+jump_vm_id    = 119
+jump_hostname = "k8s-jump"
+jump_ip       = "192.168.100.19"
+
+# ============================================================================
+# Network Configuration
+# ============================================================================
+network_bridge = "vmbr0"
+gateway        = "192.168.100.1"
+nameservers    = ["8.8.8.8", "8.8.4.4"]
+
+# ============================================================================
+# Cloud-init User Configuration
+# ============================================================================
+cloud_init_user     = "a1"
+cloud_init_password = ""  # Leave empty to disable password auth, rely on SSH key only

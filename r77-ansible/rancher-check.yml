@@ -1,0 +1,152 @@
+---
+# Troubleshoot Rancher installation
+- name: Check Rancher status
+  hosts: k8s_rancher
+  become: true
+
+  tasks:
+    - name: Check K3s service status
+      shell: systemctl status k3s
+      register: k3s_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display K3s service status
+      debug:
+        var: k3s_status.stdout_lines
+
+    - name: Get all pods in cattle-system namespace
+      shell: kubectl get pods -n cattle-system -o wide
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: rancher_pods
+      changed_when: false
+
+    - name: Display Rancher pods
+      debug:
+        var: rancher_pods.stdout_lines
+
+    - name: Get Rancher service details
+      shell: kubectl get svc -n cattle-system
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: rancher_svc
+      changed_when: false
+
+    - name: Display Rancher services
+      debug:
+        var: rancher_svc.stdout_lines
+
+    - name: Get Rancher ingress
+      shell: kubectl get ingress -n cattle-system
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: rancher_ingress
+      changed_when: false
+      failed_when: false
+
+    - name: Display Rancher ingress
+      debug:
+        var: rancher_ingress.stdout_lines
+
+    - name: Check if port 443 is listening
+      shell: netstat -tlnp | grep :443 || ss -tlnp | grep :443
+      register: port_443
+      changed_when: false
+      failed_when: false
+
+    - name: Display port 443 status
+      debug:
+        var: port_443.stdout_lines
+
+    - name: Check if port 80 is listening
+      shell: netstat -tlnp | grep :80 || ss -tlnp | grep :80
+      register: port_80
+      changed_when: false
+      failed_when: false
+
+    - name: Display port 80 status
+      debug:
+        var: port_80.stdout_lines
+
+    - name: Get Rancher deployment status
+      shell: kubectl get deployment rancher -n cattle-system -o wide
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: rancher_deploy
+      changed_when: false
+      failed_when: false
+
+    - name: Display Rancher deployment
+      debug:
+        var: rancher_deploy.stdout_lines
+
+    - name: Check Rancher logs (last 50 lines)
+      shell: kubectl logs -n cattle-system -l app=rancher --tail=50
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: rancher_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Display Rancher logs
+      debug:
+        var: rancher_logs.stdout_lines
+
+    - name: Check K3s traefik (default ingress controller)
+      shell: kubectl get pods -n kube-system | grep traefik
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: traefik_check
+      changed_when: false
+      failed_when: false
+
+    - name: Display Traefik status
+      debug:
+        msg: "{{ 'Traefik is disabled (expected - we disabled it during K3s install)' if traefik_check.stdout == '' else 'Traefik is running: ' + traefik_check.stdout }}"
+
+    - name: Get all namespaces
+      shell: kubectl get ns
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: namespaces
+      changed_when: false
+
+    - name: Display namespaces
+      debug:
+        var: namespaces.stdout_lines
+
+    - name: Check if nginx-ingress is running
+      shell: kubectl get pods -A | grep -i ingress
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: ingress_check
+      changed_when: false
+      failed_when: false
+
+    - name: Display ingress controller status
+      debug:
+        var: ingress_check.stdout_lines
+      when: ingress_check.stdout != ""
+
+    - name: Summary and next steps
+      debug:
+        msg:
+          - "======================================"
+          - "Rancher Troubleshooting Summary"
+          - "======================================"
+          - ""
+          - "Check the output above for issues:"
+          - "1. Rancher pods should be Running (not CrashLoopBackOff or Pending)"
+          - "2. Port 443 should be listening (for HTTPS access)"
+          - "3. Ingress should exist in cattle-system namespace"
+          - ""
+          - "Common issues:"
+          - "- If no ingress controller: Rancher needs an ingress controller"
+          - "- If pods are Pending: Check kubectl describe pod for events"
+          - "- If pods are CrashLoopBackOff: Check logs above"
+          - ""
+          - "To access Rancher, you may need to:"
+          - "1. Port forward: kubectl port-forward -n cattle-system svc/rancher 8443:443"
+          - "   Then access: https://localhost:8443"
+          - "2. Or install nginx-ingress controller"

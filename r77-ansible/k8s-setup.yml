@@ -1,0 +1,66 @@
+---
+# Setup Kubernetes cluster by executing k8s-node-setup.sh on all nodes
+# This playbook copies and runs the bash script that prepares all nodes
+
+# ============================================================================
+# Execute k8s-node-setup.sh on all Kubernetes nodes
+# ============================================================================
+- name: Setup K8s nodes using bash script
+  hosts: k8s_cluster                    # Runs on all nodes in k8s_cluster group
+  become: true                          # Run tasks with sudo (as root)
+
+  tasks:
+    - name: Copy k8s-node-setup.sh to /tmp
+      copy:
+        src: scripts/k8s-node-setup.sh
+        dest: /tmp/k8s-node-setup.sh
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Execute k8s-node-setup.sh
+      shell: /tmp/k8s-node-setup.sh
+      args:
+        executable: /bin/bash
+      register: setup_output
+      async: 1800                       # Timeout after 30 minutes
+      poll: 10                          # Check every 10 seconds
+
+    - name: Display setup script output
+      debug:
+        var: setup_output.stdout_lines
+      when: setup_output.stdout_lines is defined
+
+    - name: Display setup script errors (if any)
+      debug:
+        var: setup_output.stderr_lines
+      when: setup_output.stderr_lines is defined and setup_output.stderr_lines | length > 0
+
+    - name: Remove temporary setup script
+      file:
+        path: /tmp/k8s-node-setup.sh
+        state: absent
+
+# ============================================================================
+# NOTE: Cluster initialization is done manually
+# ============================================================================
+# This playbook only prepares the nodes. To initialize the cluster:
+#
+# 1. SSH to first control plane:
+#    ssh a1@192.168.100.11
+#
+# 2. Initialize cluster:
+#    sudo kubeadm init \
+#      --control-plane-endpoint=192.168.100.10:6443 \
+#      --upload-certs \
+#      --pod-network-cidr=10.244.0.0/16
+#
+# 3. Configure kubectl:
+#    mkdir -p $HOME/.kube
+#    sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
+#    sudo chown $(id -u):$(id -g) $HOME/.kube/config
+#
+# 4. Install Calico CNI:
+#    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.31.0/manifests/calico.yaml
+#
+# 5. Get join tokens (see README.md for details)

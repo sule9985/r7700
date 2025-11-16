@@ -1,0 +1,131 @@
+---
+# Fix Rancher access by converting nginx-ingress to LoadBalancer
+- name: Fix Rancher access
+  hosts: k8s_rancher
+  become: true
+
+  tasks:
+    - name: Delete existing nginx-ingress controller service
+      shell: kubectl delete svc ingress-nginx-controller -n ingress-nginx
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      failed_when: false
+
+    - name: Create LoadBalancer service for nginx-ingress
+      shell: |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ingress-nginx-controller
+          namespace: ingress-nginx
+        spec:
+          type: LoadBalancer
+          externalIPs:
+          - 192.168.100.20
+          ports:
+          - name: http
+            port: 80
+            protocol: TCP
+            targetPort: http
+          - name: https
+            port: 443
+            protocol: TCP
+            targetPort: https
+          selector:
+            app.kubernetes.io/component: controller
+            app.kubernetes.io/instance: ingress-nginx
+            app.kubernetes.io/name: ingress-nginx
+        EOF
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Wait a few seconds for service to be created
+      pause:
+        seconds: 5
+
+    - name: Get nginx-ingress service
+      shell: kubectl get svc ingress-nginx-controller -n ingress-nginx
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: ingress_svc
+      changed_when: false
+
+    - name: Display nginx-ingress service
+      debug:
+        var: ingress_svc.stdout_lines
+
+    - name: Check if ports are now listening
+      shell: ss -tlnp | grep -E ':(80|443)' || netstat -tlnp | grep -E ':(80|443)'
+      register: ports_check
+      changed_when: false
+      failed_when: false
+
+    - name: Display listening ports
+      debug:
+        var: ports_check.stdout_lines
+
+    - name: Get Rancher ingress details
+      shell: kubectl get ingress rancher -n cattle-system -o yaml
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: rancher_ingress
+      changed_when: false
+
+    - name: Check if ingress has correct host
+      shell: kubectl get ingress rancher -n cattle-system -o jsonpath='{.spec.rules[0].host}'
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: ingress_host
+      changed_when: false
+
+    - name: Display ingress host
+      debug:
+        msg: "Ingress is configured for host: {{ ingress_host.stdout }}"
+
+    - name: Get nginx-ingress pods
+      shell: kubectl get pods -n ingress-nginx -o wide
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: nginx_pods
+      changed_when: false
+
+    - name: Display nginx-ingress pods
+      debug:
+        var: nginx_pods.stdout_lines
+
+    - name: Test Rancher backend connectivity
+      shell: kubectl exec -n ingress-nginx $(kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}') -- curl -k -I https://rancher.cattle-system.svc.cluster.local
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: backend_test
+      changed_when: false
+      failed_when: false
+
+    - name: Display backend connectivity test
+      debug:
+        var: backend_test.stdout_lines
+      when: backend_test.stdout_lines is defined
+
+    - name: Final access instructions
+      debug:
+        msg:
+          - "==============================================="
+          - "Rancher Access Configuration"
+          - "==============================================="
+          - ""
+          - "Access Rancher at:"
+          - "  https://192.168.100.20.sslip.io"
+          - ""
+          - "IMPORTANT: You MUST use the full hostname!"
+          - "  ✓ https://192.168.100.20.sslip.io (CORRECT)"
+          - "  ✗ https://192.168.100.20 (WRONG - will give 404)"
+          - ""
+          - "Why? Rancher ingress is configured for '192.168.100.20.sslip.io'"
+          - "If you use just the IP, nginx won't route to Rancher."
+          - ""
+          - "Bootstrap Password: admin-rancher-2024"
+          - ""
+          - "If you want to use the bare IP, run:"
+          - "  kubectl patch ingress rancher -n cattle-system --type=json -p='[{\"op\":\"add\",\"path\":\"/spec/rules/-\",\"value\":{\"host\":\"192.168.100.20\",\"http\":{\"paths\":[{\"backend\":{\"service\":{\"name\":\"rancher\",\"port\":{\"number\":80}}},\"pathType\":\"ImplementationSpecific\",\"path\":\"/\"}]}}}]'"
+          - "==============================================="

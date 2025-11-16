@@ -1,0 +1,13 @@
+# Proxmox API Connection
+# Copy this file to terraform.tfvars and fill in your values
+# Or set these as environment variables:
+#   export TF_VAR_proxmox_api_url="https://your-proxmox:8006"
+#   export TF_VAR_proxmox_api_token_id="user@pam!terraform=your-secret-here"
+
+proxmox_api_url      = "https://your-proxmox-server:8006"
+proxmox_api_token_id = "user@pam!terraform=your-secret-token-here"
+proxmox_tls_insecure = true
+
+# Global Network Configuration
+gateway     = "192.168.100.1"
+dns_servers = ["8.8.8.8", "8.8.4.4"]

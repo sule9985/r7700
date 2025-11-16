@@ -1,0 +1,77 @@
+---
+# Copy setup scripts to VMs
+# This playbook distributes bash scripts to load balancer and K8s nodes
+
+# ============================================================================
+# Copy script to load balancer
+# ============================================================================
+- name: Copy setup script to load balancer
+  hosts: k8s_lb
+  become: false                         # Run as user a1, not root
+
+  tasks:
+    - name: Create scripts directory in user home on load balancer
+      file:
+        path: ~/scripts
+        state: directory
+        mode: '0755'
+
+    - name: Copy k8s-lb-setup.sh to load balancer
+      copy:
+        src: scripts/k8s-lb-setup.sh
+        dest: ~/scripts/k8s-lb-setup.sh
+        mode: '0755'
+
+    - name: Display script location on load balancer
+      debug:
+        msg: "Script copied to ~/scripts/k8s-lb-setup.sh on {{ inventory_hostname }}"
+
+# ============================================================================
+# Copy script to all K8s nodes (control planes + workers)
+# ============================================================================
+- name: Copy setup script to K8s nodes
+  hosts: k8s_cluster
+  become: false                         # Run as user a1, not root
+
+  tasks:
+    - name: Create scripts directory in user home on K8s nodes
+      file:
+        path: ~/scripts
+        state: directory
+        mode: '0755'
+
+    - name: Copy k8s-node-setup.sh to K8s nodes
+      copy:
+        src: scripts/k8s-node-setup.sh
+        dest: ~/scripts/k8s-node-setup.sh
+        mode: '0755'
+
+    - name: Display script location on K8s nodes
+      debug:
+        msg: "Script copied to ~/scripts/k8s-node-setup.sh on {{ inventory_hostname }}"
+
+# ============================================================================
+# Summary
+# ============================================================================
+- name: Summary
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Display summary
+      debug:
+        msg:
+          - "Scripts have been copied to all VMs!"
+          - ""
+          - "Load Balancer (k8s-lb):"
+          - "  - /home/a1/scripts/k8s-lb-setup.sh"
+          - ""
+          - "K8s Nodes (control planes + workers):"
+          - "  - /home/a1/scripts/k8s-node-setup.sh"
+          - ""
+          - "To run the scripts manually:"
+          - "  ssh a1@<host-ip>"
+          - "  sudo ~/scripts/k8s-lb-setup.sh      # On load balancer"
+          - "  sudo ~/scripts/k8s-node-setup.sh    # On K8s nodes"
+          - ""
+          - "Note: Scripts are in user a1's home directory and require sudo to run."

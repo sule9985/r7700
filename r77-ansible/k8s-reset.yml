@@ -1,0 +1,69 @@
+---
+# Reset Kubernetes cluster
+# This playbook removes all Kubernetes components from nodes
+# CAUTION: This will destroy your cluster! All data will be lost.
+
+- name: Reset Kubernetes cluster on all nodes
+  hosts: k8s_cluster                    # Runs on all control planes and workers
+  become: true                          # Run as root
+
+  tasks:
+    # ------------------------------------------------------------------------
+    # Reset Kubernetes using kubeadm
+    # ------------------------------------------------------------------------
+    - name: Reset Kubernetes with kubeadm
+      shell: kubeadm reset -f           # -f = force, no confirmation prompt
+      ignore_errors: true               # Continue even if kubeadm isn't initialized
+      # This removes all Kubernetes components installed by kubeadm
+
+    # ------------------------------------------------------------------------
+    # Remove Kubernetes directories and files
+    # ------------------------------------------------------------------------
+    - name: Remove Kubernetes directories
+      file:
+        path: "{{ item }}"              # Directory path to remove
+        state: absent                   # Ensure it doesn't exist
+      loop:
+        - /etc/cni                      # CNI (Container Network Interface) config
+        - /etc/kubernetes               # Kubernetes configs (manifests, certs, etc.)
+        - /var/lib/etcd                 # etcd database (control plane state)
+        - /var/lib/kubelet              # kubelet data
+      # These directories contain all cluster state and configuration
+
+    - name: Remove user kubectl config
+      file:
+        path: /home/a1/.kube            # User's kubectl configuration
+        state: absent
+      # Remove kubectl config for user a1
+
+    - name: Remove root kubectl config
+      file:
+        path: /root/.kube               # Root's kubectl configuration
+        state: absent
+      # Remove kubectl config for root user
+
+    # ------------------------------------------------------------------------
+    # Optional: Reboot nodes
+    # ------------------------------------------------------------------------
+    - name: Reboot nodes (optional but recommended)
+      reboot:                           # Module to reboot the system
+        msg: "Rebooting after Kubernetes reset"
+        connect_timeout: 5              # Wait 5 seconds before considering reboot started
+        reboot_timeout: 600             # Wait up to 10 minutes for reboot to complete
+        pre_reboot_delay: 0             # Start reboot immediately
+        post_reboot_delay: 30           # Wait 30 seconds after reboot before continuing
+      when: reboot_after_reset | default(true)
+      # Reboot ensures all processes are stopped and system is clean
+      # Set reboot_after_reset=false to skip: ansible-playbook reset-k8s.yml -e "reboot_after_reset=false"
+
+    - name: Wait for nodes to come back online
+      wait_for_connection:              # Wait for SSH to become available
+        connect_timeout: 20
+        sleep: 5
+        delay: 5
+        timeout: 300
+      when: reboot_after_reset | default(true)
+      # Ensures Ansible can reconnect after reboot
+
+  handlers:
+    # No handlers needed for this playbook

@@ -1,0 +1,43 @@
+---
+# Setup nginx load balancer for Kubernetes API
+- name: Setup nginx load balancer
+  hosts: k8s_lb
+  become: true
+
+  tasks:
+    - name: Install nginx with stream module
+      apt:
+        name:
+          - nginx
+          - libnginx-mod-stream
+        state: present
+        update_cache: true
+
+    - name: Configure nginx for K8s API load balancing
+      copy:
+        content: |
+          stream {
+              upstream k8s_api {
+                  server 192.168.100.11:6443;
+                  server 192.168.100.12:6443;
+                  server 192.168.100.13:6443;
+              }
+
+              server {
+                  listen 6443;
+                  proxy_pass k8s_api;
+              }
+          }
+        dest: /etc/nginx/nginx-k8s-lb.conf
+
+    - name: Include stream config in nginx.conf
+      lineinfile:
+        path: /etc/nginx/nginx.conf
+        line: 'include /etc/nginx/nginx-k8s-lb.conf;'
+        insertbefore: '^events'
+
+    - name: Restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+        enabled: true

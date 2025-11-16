@@ -1,0 +1,229 @@
+---
+# Setup Rancher Server with K3s
+# This playbook installs K3s (lightweight Kubernetes) and Rancher on a single VM
+
+# ============================================================================
+# Install K3s on Rancher VM
+# ============================================================================
+- name: Install K3s on Rancher server
+  hosts: k8s_rancher
+  become: true
+
+  vars:
+    k3s_version: "v1.33.0+k3s1"  # K3s v1.33 (latest stable)
+    rancher_version: "2.12.3"    # Rancher v2.12.3
+    rancher_hostname: "rancher.local"  # Change to your domain if you have one
+
+  tasks:
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        upgrade: yes
+
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - wget
+          - ca-certificates
+          - gnupg
+        state: present
+
+    - name: Check if K3s is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+
+    - name: Install K3s
+      shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" sh -s - server \
+          --write-kubeconfig-mode=644 \
+          --disable=traefik \
+          --tls-san={{ ansible_host }}
+      when: not k3s_binary.stat.exists
+
+    - name: Wait for K3s to be ready
+      wait_for:
+        path: /etc/rancher/k3s/k3s.yaml
+        timeout: 300
+
+    - name: Verify K3s is running
+      shell: k3s kubectl get nodes
+      register: k3s_nodes
+      changed_when: false
+
+    - name: Display K3s nodes
+      debug:
+        var: k3s_nodes.stdout_lines
+
+    - name: Create kubectl symlink for convenience
+      file:
+        src: /usr/local/bin/k3s
+        dest: /usr/local/bin/kubectl
+        state: link
+
+# ============================================================================
+# Install Helm
+# ============================================================================
+- name: Install Helm
+  hosts: k8s_rancher
+  become: true
+
+  tasks:
+    - name: Check if Helm is already installed
+      stat:
+        path: /usr/local/bin/helm
+      register: helm_binary
+
+    - name: Download and install Helm
+      shell: |
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      when: not helm_binary.stat.exists
+
+    - name: Verify Helm installation
+      shell: helm version --short
+      register: helm_version
+      changed_when: false
+
+    - name: Display Helm version
+      debug:
+        var: helm_version.stdout
+
+# ============================================================================
+# Install cert-manager (required by Rancher)
+# ============================================================================
+- name: Install cert-manager
+  hosts: k8s_rancher
+  become: true
+
+  tasks:
+    - name: Install cert-manager v1.19.1 (recommended kubectl apply method)
+      shell: |
+        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.1/cert-manager.yaml
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Wait for cert-manager controller to be ready
+      shell: kubectl wait --for=condition=ready pod -l app=cert-manager -n cert-manager --timeout=300s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Wait for cert-manager webhook to be ready
+      shell: kubectl wait --for=condition=ready pod -l app=webhook -n cert-manager --timeout=300s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Wait for cert-manager cainjector to be ready
+      shell: kubectl wait --for=condition=ready pod -l app=cainjector -n cert-manager --timeout=300s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Verify cert-manager installation
+      shell: kubectl get pods -n cert-manager
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: cert_manager_pods
+      changed_when: false
+
+    - name: Display cert-manager pods
+      debug:
+        var: cert_manager_pods.stdout_lines
+
+# ============================================================================
+# Install Rancher
+# ============================================================================
+- name: Install Rancher
+  hosts: k8s_rancher
+  become: true
+
+  vars:
+    rancher_version: "2.12.3"    # Rancher v2.12.3
+    rancher_hostname: "{{ ansible_host }}.sslip.io"  # Uses sslip.io for automatic DNS
+    bootstrap_password: "admin-rancher-25"  # Change this!
+
+  tasks:
+    - name: Add Rancher Helm repository
+      shell: |
+        helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+        helm repo update
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Create cattle-system namespace
+      shell: kubectl create namespace cattle-system --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Install Rancher via Helm
+      shell: |
+        helm upgrade --install rancher rancher-stable/rancher \
+          --namespace cattle-system \
+          --set hostname={{ rancher_hostname }} \
+          --set bootstrapPassword={{ bootstrap_password }} \
+          --set replicas=1 \
+          --version {{ rancher_version }} \
+          --wait
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: rancher_install
+      changed_when: "'has been upgraded' in rancher_install.stdout or 'has been installed' in rancher_install.stdout"
+
+    - name: Wait for Rancher deployment to be ready
+      shell: kubectl -n cattle-system rollout status deploy/rancher --timeout=600s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Get Rancher pods status
+      shell: kubectl get pods -n cattle-system
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: rancher_pods
+      changed_when: false
+
+    - name: Display Rancher pods
+      debug:
+        var: rancher_pods.stdout_lines
+
+# ============================================================================
+# Display Access Information
+# ============================================================================
+- name: Display Rancher access information
+  hosts: k8s_rancher
+  become: false
+
+  vars:
+    rancher_hostname: "{{ ansible_host }}.sslip.io"
+    bootstrap_password: "admin-rancher-2024"
+
+  tasks:
+    - name: Display success message
+      debug:
+        msg:
+          - "==============================================="
+          - "Rancher Installation Completed!"
+          - "==============================================="
+          - ""
+          - "Access Rancher at:"
+          - "  https://{{ rancher_hostname }}"
+          - "  OR"
+          - "  https://{{ ansible_host }}"
+          - ""
+          - "Initial Login:"
+          - "  Bootstrap Password: {{ bootstrap_password }}"
+          - ""
+          - "IMPORTANT: Change the password on first login!"
+          - ""
+          - "K3s kubeconfig location:"
+          - "  /etc/rancher/k3s/k3s.yaml"
+          - ""
+          - "To access from your local machine:"
+          - "  scp a1@{{ ansible_host }}:/etc/rancher/k3s/k3s.yaml ~/.kube/rancher-config"
+          - "  # Edit the file and change 127.0.0.1 to {{ ansible_host }}"
+          - "  export KUBECONFIG=~/.kube/rancher-config"
+          - "  kubectl get nodes"
+          - ""
+          - "To import your existing K8s cluster into Rancher:"
+          - "  1. Login to Rancher UI"
+          - "  2. Click 'Import Existing' cluster"
+          - "  3. Follow the instructions to run kubectl apply on your K8s cluster"
+          - "==============================================="

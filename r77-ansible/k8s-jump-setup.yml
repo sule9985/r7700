@@ -1,0 +1,105 @@
+---
+# Setup Jump Server (Bastion Host)
+# This playbook configures the jump server with essential tools for K8s cluster access
+
+# ============================================================================
+# Setup jump server with kubectl and basic utilities
+# ============================================================================
+- name: Setup jump server
+  hosts: k8s_jump
+  become: true
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install basic utilities
+      apt:
+        name:
+          - vim
+          - curl
+          - wget
+          - git
+          - tmux
+          - htop
+          - net-tools
+        state: present
+
+    - name: Install kubectl prerequisites
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - gpg
+        state: present
+
+    - name: Add Kubernetes apt key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /
+        mode: '0644'
+
+    - name: Update apt cache after adding K8s repo
+      apt:
+        update_cache: yes
+
+    - name: Install kubectl
+      apt:
+        name: kubectl
+        state: present
+
+    - name: Hold kubectl package
+      command: apt-mark hold kubectl
+      changed_when: false
+
+    - name: Verify kubectl version
+      command: kubectl version --client
+      register: kubectl_version
+      changed_when: false
+
+    - name: Display kubectl version
+      debug:
+        var: kubectl_version.stdout_lines
+
+# ============================================================================
+# Setup kubectl configuration for user a1
+# ============================================================================
+- name: Setup kubectl for user a1
+  hosts: k8s_jump
+  become: false
+
+  tasks:
+    - name: Create .kube directory for user a1
+      file:
+        path: ~/.kube
+        state: directory
+        mode: '0755'
+
+    - name: Display setup completion message
+      debug:
+        msg:
+          - "Jump server setup completed!"
+          - ""
+          - "Installed packages:"
+          - "  - kubectl (K8s v1.34)"
+          - "  - vim, curl, wget, git, tmux, htop, net-tools"
+          - ""
+          - "Next steps:"
+          - "  1. After initializing K8s cluster, copy kubeconfig to this jump server:"
+          - "     scp a1@192.168.100.11:~/.kube/config ~/.kube/config"
+          - ""
+          - "  2. Test kubectl access:"
+          - "     kubectl get nodes"
+          - ""
+          - "  3. Use jump server to access cluster nodes:"
+          - "     ssh a1@192.168.100.11  # Control plane 1"
+          - "     ssh a1@192.168.100.14  # Worker 4"

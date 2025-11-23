@@ -1,0 +1,768 @@
+---
+# Grafana Monitoring Stack Setup
+# Installs: Grafana, Prometheus, Loki, AlertManager, Proxmox PVE Exporter
+# Target: Debian 13 LXC container (192.168.100.40)
+
+- name: Setup Grafana Monitoring Stack
+  hosts: grafana_stack
+  become: true
+
+  vars:
+    # Service versions (latest as of 2025)
+    grafana_version: "12.3.0"
+    prometheus_version: "3.7.3"
+    loki_version: "3.6.0"
+    alertmanager_version: "0.29.0"
+
+    # Prometheus configuration
+    prometheus_retention_time: "15d"
+    prometheus_storage_path: "/var/lib/prometheus"
+
+    # Loki configuration
+    loki_retention_days: 7
+    loki_storage_path: "/var/lib/loki"
+
+    # Proxmox configuration (update with your Proxmox details)
+    proxmox_host: "192.168.100.4"
+    proxmox_port: "8006"
+
+    # JMeter integration
+    jmeter_host: "192.168.100.23"
+    jmeter_metrics_port: "9270"
+
+  tasks:
+    # ========================================
+    # System Preparation
+    # ========================================
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install base packages
+      apt:
+        name:
+          - apt-transport-https
+          - software-properties-common
+          - wget
+          - curl
+          - gnupg2
+          - ca-certificates
+          - adduser
+          - libfontconfig1
+        state: present
+
+    # ========================================
+    # Grafana Installation
+    # ========================================
+
+    - name: Add Grafana GPG key
+      apt_key:
+        url: https://apt.grafana.com/gpg.key
+        state: present
+
+    - name: Add Grafana repository
+      apt_repository:
+        repo: "deb https://apt.grafana.com stable main"
+        state: present
+        filename: grafana
+
+    - name: Install Grafana
+      apt:
+        name: "grafana={{ grafana_version }}"
+        state: present
+        update_cache: yes
+        allow_downgrades: yes
+
+    - name: Enable and start Grafana service
+      systemd:
+        name: grafana-server
+        enabled: yes
+        state: started
+
+    # ========================================
+    # Prometheus Installation
+    # ========================================
+
+    - name: Create prometheus system group
+      group:
+        name: prometheus
+        system: yes
+
+    - name: Create prometheus system user
+      user:
+        name: prometheus
+        system: yes
+        group: prometheus
+        shell: /usr/sbin/nologin
+        home: "{{ prometheus_storage_path }}"
+        create_home: no
+
+    - name: Create Prometheus directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+      loop:
+        - /etc/prometheus
+        - /etc/prometheus/rules
+        - /etc/prometheus/file_sd
+        - "{{ prometheus_storage_path }}"
+
+    - name: Download Prometheus
+      get_url:
+        url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: /tmp/prometheus.tar.gz
+        mode: '0644'
+        timeout: 300
+
+    - name: Extract Prometheus
+      unarchive:
+        src: /tmp/prometheus.tar.gz
+        dest: /tmp/
+        remote_src: yes
+        creates: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64"
+
+    - name: Check if Prometheus is already installed
+      stat:
+        path: /usr/local/bin/prometheus
+      register: prometheus_binary
+
+    - name: Get installed Prometheus version
+      command: /usr/local/bin/prometheus --version
+      register: prometheus_installed_version
+      when: prometheus_binary.stat.exists
+      changed_when: false
+      failed_when: false
+
+    - name: Copy Prometheus binaries
+      copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+        remote_src: yes
+      loop:
+        - prometheus
+        - promtool
+      when: not prometheus_binary.stat.exists or prometheus_version not in prometheus_installed_version.stdout
+      notify: restart prometheus
+
+    - name: Copy Prometheus consoles
+      copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: "/etc/prometheus/{{ item }}"
+        owner: prometheus
+        group: prometheus
+        remote_src: yes
+      loop:
+        - consoles
+        - console_libraries
+
+    - name: Create Prometheus configuration
+      copy:
+        dest: /etc/prometheus/prometheus.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+        backup: yes
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+            external_labels:
+              monitor: 'grafana-stack'
+              cluster: 'proxmox-homelab'
+
+          # Alertmanager configuration
+          alerting:
+            alertmanagers:
+              - static_configs:
+                  - targets:
+                      - localhost:9093
+
+          # Rule files
+          rule_files:
+            - /etc/prometheus/rules/*.yml
+
+          # Scrape configurations
+          scrape_configs:
+            # Prometheus itself
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+                  labels:
+                    service: 'prometheus'
+
+            # Proxmox PVE Exporter
+            - job_name: 'proxmox'
+              static_configs:
+                - targets: ['localhost:9221']
+                  labels:
+                    service: 'proxmox-pve'
+                    instance: 'pve-host'
+
+            # JMeter Load Testing Metrics
+            - job_name: 'jmeter'
+              static_configs:
+                - targets: ['{{ jmeter_host }}:{{ jmeter_metrics_port }}']
+                  labels:
+                    service: 'jmeter'
+                    instance: 'load-generator'
+              scrape_interval: 5s  # More frequent for active tests
+
+            # Node Exporter (if installed on other hosts)
+            - job_name: 'node'
+              file_sd_configs:
+                - files:
+                    - /etc/prometheus/file_sd/node_exporter.yml
+                  refresh_interval: 5m
+
+    - name: Create Prometheus systemd service
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus Monitoring System
+          Documentation=https://prometheus.io/docs/introduction/overview/
+          After=network-online.target
+
+          [Service]
+          Type=simple
+          User=prometheus
+          Group=prometheus
+          ExecStart=/usr/local/bin/prometheus \
+            --config.file=/etc/prometheus/prometheus.yml \
+            --storage.tsdb.path={{ prometheus_storage_path }} \
+            --storage.tsdb.retention.time={{ prometheus_retention_time }} \
+            --web.console.templates=/etc/prometheus/consoles \
+            --web.console.libraries=/etc/prometheus/console_libraries \
+            --web.listen-address=0.0.0.0:9090 \
+            --web.enable-lifecycle
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Create empty node exporter service discovery file
+      copy:
+        dest: /etc/prometheus/file_sd/node_exporter.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+        content: |
+          # Add node_exporter targets here
+          # Example:
+          # - targets:
+          #     - '192.168.100.11:9100'
+          #   labels:
+          #     instance: 'k8s-cp-1'
+          #     role: 'control-plane'
+        force: no
+
+    - name: Enable and start Prometheus service
+      systemd:
+        name: prometheus
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # ========================================
+    # Loki Installation
+    # ========================================
+
+    - name: Create loki system group
+      group:
+        name: loki
+        system: yes
+
+    - name: Create loki system user
+      user:
+        name: loki
+        system: yes
+        group: loki
+        shell: /usr/sbin/nologin
+        home: "{{ loki_storage_path }}"
+        create_home: no
+
+    - name: Create Loki directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: loki
+        group: loki
+        mode: '0755'
+      loop:
+        - /etc/loki
+        - "{{ loki_storage_path }}"
+        - "{{ loki_storage_path }}/chunks"
+        - "{{ loki_storage_path }}/index"
+
+    - name: Download Loki
+      get_url:
+        url: "https://github.com/grafana/loki/releases/download/v{{ loki_version }}/loki-linux-amd64.zip"
+        dest: /tmp/loki.zip
+        mode: '0644'
+        timeout: 300
+
+    - name: Install unzip
+      apt:
+        name: unzip
+        state: present
+
+    - name: Extract Loki
+      unarchive:
+        src: /tmp/loki.zip
+        dest: /tmp/
+        remote_src: yes
+
+    - name: Copy Loki binary
+      copy:
+        src: /tmp/loki-linux-amd64
+        dest: /usr/local/bin/loki
+        owner: loki
+        group: loki
+        mode: '0755'
+        remote_src: yes
+
+    - name: Create Loki configuration
+      copy:
+        dest: /etc/loki/loki.yml
+        owner: loki
+        group: loki
+        mode: '0644'
+        content: |
+          auth_enabled: false
+
+          server:
+            http_listen_port: 3100
+            grpc_listen_port: 9096
+
+          common:
+            path_prefix: {{ loki_storage_path }}
+            storage:
+              filesystem:
+                chunks_directory: {{ loki_storage_path }}/chunks
+                rules_directory: {{ loki_storage_path }}/rules
+            replication_factor: 1
+            ring:
+              instance_addr: 127.0.0.1
+              kvstore:
+                store: inmemory
+
+          schema_config:
+            configs:
+              - from: 2024-01-01
+                store: tsdb
+                object_store: filesystem
+                schema: v13
+                index:
+                  prefix: index_
+                  period: 24h
+
+          limits_config:
+            retention_period: {{ loki_retention_days }}d
+            split_queries_by_interval: 24h
+
+          compactor:
+            working_directory: {{ loki_storage_path }}/compactor
+            compaction_interval: 10m
+            retention_enabled: true
+            retention_delete_delay: 2h
+            retention_delete_worker_count: 150
+
+    - name: Create Loki systemd service
+      copy:
+        dest: /etc/systemd/system/loki.service
+        content: |
+          [Unit]
+          Description=Loki Log Aggregation System
+          Documentation=https://grafana.com/docs/loki/latest/
+          After=network-online.target
+
+          [Service]
+          Type=simple
+          User=loki
+          Group=loki
+          ExecStart=/usr/local/bin/loki -config.file=/etc/loki/loki.yml
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable and start Loki service
+      systemd:
+        name: loki
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # ========================================
+    # AlertManager Installation
+    # ========================================
+
+    - name: Create alertmanager system group
+      group:
+        name: alertmanager
+        system: yes
+
+    - name: Create alertmanager system user
+      user:
+        name: alertmanager
+        system: yes
+        group: alertmanager
+        shell: /usr/sbin/nologin
+        create_home: no
+
+    - name: Create AlertManager directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: alertmanager
+        group: alertmanager
+        mode: '0755'
+      loop:
+        - /etc/alertmanager
+        - /var/lib/alertmanager
+
+    - name: Download AlertManager
+      get_url:
+        url: "https://github.com/prometheus/alertmanager/releases/download/v{{ alertmanager_version }}/alertmanager-{{ alertmanager_version }}.linux-amd64.tar.gz"
+        dest: /tmp/alertmanager.tar.gz
+        mode: '0644'
+        timeout: 300
+
+    - name: Extract AlertManager
+      unarchive:
+        src: /tmp/alertmanager.tar.gz
+        dest: /tmp/
+        remote_src: yes
+
+    - name: Copy AlertManager binaries
+      copy:
+        src: "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        owner: alertmanager
+        group: alertmanager
+        mode: '0755'
+        remote_src: yes
+      loop:
+        - alertmanager
+        - amtool
+
+    - name: Create AlertManager configuration
+      copy:
+        dest: /etc/alertmanager/alertmanager.yml
+        owner: alertmanager
+        group: alertmanager
+        mode: '0644'
+        content: |
+          global:
+            resolve_timeout: 5m
+
+          route:
+            group_by: ['alertname', 'cluster', 'service']
+            group_wait: 10s
+            group_interval: 10s
+            repeat_interval: 12h
+            receiver: 'default'
+
+          receivers:
+            - name: 'default'
+              # Configure your notification channels here
+              # Examples: email, slack, pagerduty, webhook
+              # webhook_configs:
+              #   - url: 'http://example.com/webhook'
+
+          inhibit_rules:
+            - source_match:
+                severity: 'critical'
+              target_match:
+                severity: 'warning'
+              equal: ['alertname', 'cluster', 'service']
+
+    - name: Create AlertManager systemd service
+      copy:
+        dest: /etc/systemd/system/alertmanager.service
+        content: |
+          [Unit]
+          Description=Prometheus AlertManager
+          Documentation=https://prometheus.io/docs/alerting/alertmanager/
+          After=network-online.target
+
+          [Service]
+          Type=simple
+          User=alertmanager
+          Group=alertmanager
+          ExecStart=/usr/local/bin/alertmanager \
+            --config.file=/etc/alertmanager/alertmanager.yml \
+            --storage.path=/var/lib/alertmanager \
+            --web.listen-address=0.0.0.0:9093
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable and start AlertManager service
+      systemd:
+        name: alertmanager
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # ========================================
+    # Proxmox PVE Exporter Installation
+    # ========================================
+
+    - name: Install Python3 and pip
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+        state: present
+
+    - name: Create prometheus-pve-exporter system user
+      user:
+        name: pve-exporter
+        system: yes
+        shell: /usr/sbin/nologin
+        create_home: no
+
+    - name: Create PVE exporter directory
+      file:
+        path: /opt/prometheus-pve-exporter
+        state: directory
+        owner: pve-exporter
+        group: pve-exporter
+        mode: '0755'
+
+    - name: Install prometheus-pve-exporter via pip
+      pip:
+        name: prometheus-pve-exporter
+        state: present
+        executable: pip3
+
+    - name: Create PVE exporter configuration directory
+      file:
+        path: /etc/prometheus-pve-exporter
+        state: directory
+        mode: '0755'
+
+    - name: Create PVE exporter configuration
+      copy:
+        dest: /etc/prometheus-pve-exporter/pve.yml
+        mode: '0644'
+        content: |
+          default:
+            user: monitoring@pve
+            # IMPORTANT: Create a read-only user on Proxmox for monitoring
+            # On Proxmox host:
+            #   pveum user add monitoring@pve
+            #   pveum acl modify / -user monitoring@pve -role PVEAuditor
+            #   pveum user token add monitoring@pve exporter -privsep 0
+            # Then add the token here:
+            # token_name: "exporter"
+            # token_value: "your-token-here"
+            # OR use password:
+            password: "CHANGE_ME"
+            verify_ssl: false
+
+    - name: Create PVE exporter systemd service
+      copy:
+        dest: /etc/systemd/system/prometheus-pve-exporter.service
+        content: |
+          [Unit]
+          Description=Prometheus Proxmox VE Exporter
+          Documentation=https://github.com/prometheus-pve/prometheus-pve-exporter
+          After=network-online.target
+
+          [Service]
+          Type=simple
+          User=pve-exporter
+          Group=pve-exporter
+          ExecStart=/usr/local/bin/pve_exporter \
+            --config.file=/etc/prometheus-pve-exporter/pve.yml \
+            --web.listen-address=0.0.0.0:9221
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable PVE exporter service (but don't start until configured)
+      systemd:
+        name: prometheus-pve-exporter
+        enabled: yes
+        daemon_reload: yes
+      # Note: Service will fail until Proxmox credentials are configured
+
+    # ========================================
+    # Grafana Data Source Configuration
+    # ========================================
+
+    - name: Wait for Grafana to be ready
+      uri:
+        url: http://localhost:3000/api/health
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 30
+      delay: 2
+
+    - name: Configure Prometheus datasource in Grafana
+      uri:
+        url: http://localhost:3000/api/datasources
+        method: POST
+        user: admin
+        password: admin
+        force_basic_auth: yes
+        body_format: json
+        body:
+          name: Prometheus
+          type: prometheus
+          url: http://localhost:9090
+          access: proxy
+          isDefault: true
+          jsonData:
+            timeInterval: "15s"
+        status_code: [200, 409]  # 409 if already exists
+
+    - name: Configure Loki datasource in Grafana
+      uri:
+        url: http://localhost:3000/api/datasources
+        method: POST
+        user: admin
+        password: admin
+        force_basic_auth: yes
+        body_format: json
+        body:
+          name: Loki
+          type: loki
+          url: http://localhost:3100
+          access: proxy
+          jsonData:
+            maxLines: 1000
+        status_code: [200, 409]
+
+    # ========================================
+    # Firewall (optional - if ufw is used)
+    # ========================================
+
+    - name: Check if ufw is installed
+      command: which ufw
+      register: ufw_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Allow Grafana port
+      ufw:
+        rule: allow
+        port: '3000'
+        proto: tcp
+      when: ufw_check.rc == 0
+
+    - name: Allow Prometheus port
+      ufw:
+        rule: allow
+        port: '9090'
+        proto: tcp
+      when: ufw_check.rc == 0
+
+    - name: Allow AlertManager port
+      ufw:
+        rule: allow
+        port: '9093'
+        proto: tcp
+      when: ufw_check.rc == 0
+
+    # ========================================
+    # Cleanup
+    # ========================================
+
+    - name: Clean up downloaded archives
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/prometheus.tar.gz
+        - "/tmp/prometheus-{{ prometheus_version }}.linux-amd64"
+        - /tmp/loki.zip
+        - /tmp/loki-linux-amd64
+        - /tmp/alertmanager.tar.gz
+        - "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64"
+
+    # ========================================
+    # Summary
+    # ========================================
+
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "============================================="
+          - "Grafana Stack Deployment Complete!"
+          - "============================================="
+          - ""
+          - "Access URLs:"
+          - "  Grafana:      http://192.168.100.40:3000"
+          - "  Prometheus:   http://192.168.100.40:9090"
+          - "  AlertManager: http://192.168.100.40:9093"
+          - "  Loki API:     http://192.168.100.40:3100"
+          - ""
+          - "Default Credentials:"
+          - "  Grafana: admin / admin (change on first login)"
+          - ""
+          - "Next Steps:"
+          - "  1. Configure Proxmox credentials in /etc/prometheus-pve-exporter/pve.yml"
+          - "  2. Start PVE exporter: systemctl start prometheus-pve-exporter"
+          - "  3. Access Grafana and change default password"
+          - "  4. Import dashboards for Proxmox and JMeter"
+          - "  5. Configure AlertManager notification channels"
+          - ""
+          - "JMeter Integration:"
+          - "  - Prometheus is configured to scrape {{ jmeter_host }}:{{ jmeter_metrics_port }}"
+          - "  - Start JMeter tests with Prometheus plugin to see metrics"
+          - "============================================="
+          - ""
+          - "Service Versions Installed:"
+          - "  - Grafana:      v{{ grafana_version }}"
+          - "  - Prometheus:   v{{ prometheus_version }}"
+          - "  - Loki:         v{{ loki_version }}"
+          - "  - AlertManager: v{{ alertmanager_version }}"
+
+  handlers:
+    - name: restart grafana
+      systemd:
+        name: grafana-server
+        state: restarted
+
+    - name: restart prometheus
+      systemd:
+        name: prometheus
+        state: restarted
+
+    - name: restart loki
+      systemd:
+        name: loki
+        state: restarted
+
+    - name: restart alertmanager
+      systemd:
+        name: alertmanager
+        state: restarted
+
+    - name: restart prometheus-pve-exporter
+      systemd:
+        name: prometheus-pve-exporter
+        state: restarted

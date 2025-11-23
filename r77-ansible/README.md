@@ -1,89 +1,101 @@
 # r77-ansible
 
-Simple Ansible configuration for Proxmox K8s cluster.
+Ansible automation for Proxmox-based infrastructure. Organized by service type for easy management.
 
-## Structure
+## Directory Structure
 
 ```
 r77-ansible/
-├── ansible.cfg       # Ansible configuration
-├── inventory.yml     # All hosts and IPs
-├── copy-scripts.yml  # Copy setup scripts to VMs (optional)
-├── setup-jump.yml    # Setup jump server (bastion host)
-├── setup-lb.yml      # Setup nginx load balancer
-├── setup-k8s.yml     # Setup Kubernetes cluster (runs k8s-node-setup.sh)
-├── reset-k8s.yml     # Reset/destroy Kubernetes cluster
-└── scripts/          # Bash scripts for node setup
-    ├── k8s-lb-setup.sh      # Load balancer setup script
-    └── k8s-node-setup.sh    # K8s node setup script (used by setup-k8s.yml)
+├── ansible.cfg              # Ansible configuration
+├── inventory.yml            # All hosts and IPs
+├── collections/             # Ansible collections (ansible.posix, community.general)
+├── k8s/                     # Kubernetes cluster automation
+│   ├── scripts/             # Setup bash scripts
+│   ├── k8s-setup.yml        # Prepare K8s nodes
+│   ├── k8s-lb-setup.yml     # Configure nginx load balancer
+│   ├── k8s-jump-setup.yml   # Setup jump server
+│   ├── k8s-copy-scripts.yml # Copy scripts to VMs
+│   └── k8s-reset.yml        # Destroy cluster
+├── jmeter/                  # Load testing setup
+│   ├── docs/                # Quick start and usage guides
+│   ├── tests/               # Sample JMeter test plans (.jmx)
+│   ├── jmeter-setup.yml     # Install and configure JMeter
+│   └── fix-jmeter-permissions.yml
+├── grafana-stack/           # Monitoring infrastructure
+│   ├── docs/                # Deployment and version guides
+│   ├── grafana-stack-setup.yml        # Automated Ansible setup
+│   ├── grafana-stack-manual-setup.sh  # Manual bash setup (for learning)
+│   └── grafana-setup.yml              # Standalone Grafana setup
+├── rancher/                 # Rancher management platform
+│   ├── rancher-setup.yml    # Install Rancher (K3s-based)
+│   ├── rancher-check.yml    # Verify installation
+│   ├── rancher-install-nginx-ingress.yml
+│   └── fix-rancher-access.yml
+└── lxc/                     # LXC container utilities
+    ├── lxc-initial-setup.yml    # Bootstrap new containers
+    └── setup-lxc-network.sh     # Network configuration helper
 ```
 
 ## Quick Start
 
+### Test Connectivity
 ```bash
-# Test connectivity
 ansible all -m ping
-
-# Setup jump server (optional but recommended)
-ansible-playbook setup-jump.yml
-
-# Setup nginx load balancer
-ansible-playbook setup-lb.yml
-
-# Setup Kubernetes
-ansible-playbook setup-k8s.yml
-
-# Or run all at once
-ansible-playbook setup-jump.yml setup-lb.yml setup-k8s.yml
 ```
 
-## What Each Playbook Does
+### Deploy Kubernetes Cluster
+```bash
+# Setup infrastructure components
+ansible-playbook k8s/k8s-jump-setup.yml   # Jump server (optional)
+ansible-playbook k8s/k8s-lb-setup.yml     # Load balancer
+ansible-playbook k8s/k8s-setup.yml        # Prepare all K8s nodes
 
-### setup-jump.yml
-- Installs kubectl (K8s v1.34) for cluster management
-- Installs basic utilities (vim, curl, wget, git, tmux, htop, net-tools)
-- Creates .kube directory for kubeconfig
-- Provides secure entry point to access cluster nodes
+# Then manually initialize cluster (see K8s section below)
+```
 
-**Note**: After cluster initialization, copy kubeconfig from control plane to jump server.
+### Deploy Monitoring Stack
+```bash
+# Automated Ansible deployment
+ansible-playbook grafana-stack/grafana-stack-setup.yml
 
-### setup-lb.yml
-- Installs nginx and libnginx-mod-stream (TCP load balancing module)
-- Configures TCP load balancing for K8s API (port 6443)
-- Balances across 3 control plane nodes
+# Or manual bash installation (for learning)
+# Copy script to LXC container first, then:
+./grafana-stack/grafana-stack-manual-setup.sh
+```
 
-### setup-k8s.yml
-- Copies and executes `scripts/k8s-node-setup.sh` on all K8s nodes
-- The script performs:
+### Deploy Load Testing
+```bash
+ansible-playbook jmeter/jmeter-setup.yml
+
+# See jmeter/docs/ for usage guides
+```
+
+### Deploy Rancher
+```bash
+ansible-playbook rancher/rancher-setup.yml
+ansible-playbook rancher/rancher-check.yml
+```
+
+## Component Details
+
+### Kubernetes Cluster (k8s/)
+
+**What each playbook does:**
+
+- **k8s-setup.yml**: Prepares all nodes with containerd, kubeadm, kubelet, kubectl v1.34
   - Disables swap
-  - Configures /etc/hosts with all cluster nodes
-  - Loads kernel modules (overlay, br_netfilter, xt_set, ip_set) with persistence
-  - Configures sysctl for networking (IPv4 and IPv6 support)
-  - Installs containerd with SystemdCgroup enabled and CNI bin_dir configured
-  - Installs kubelet, kubeadm, kubectl (version 1.34)
-  - Holds packages to prevent accidental upgrades
+  - Configures /etc/hosts
+  - Loads kernel modules
+  - Configures sysctl
+  - Installs container runtime and K8s packages
 
-**Note**: This playbook only prepares the nodes. Cluster initialization is done manually (see below).
+- **k8s-lb-setup.yml**: Configures nginx TCP load balancer for K8s API (port 6443)
 
-### reset-k8s.yml
-- Runs `kubeadm reset -f` on all nodes
-- Removes all Kubernetes directories (etcd, kubelet, CNI, configs)
-- Removes kubectl configs for users
-- Reboots all nodes (optional, controlled by variable)
+- **k8s-jump-setup.yml**: Sets up jump server with kubectl and utilities
 
-**CAUTION**: This destroys your cluster! Use when starting over.
+- **k8s-reset.yml**: Destroys cluster (CAUTION: runs `kubeadm reset -f`)
 
-## Customization
-
-Edit `inventory.yml` to change IPs.
-
-Edit nginx upstream in `setup-lb.yml` if you change control plane IPs.
-
-## Manual Steps After Ansible
-
-### Step 1: Initialize the Cluster
-
-After running the playbooks, you need to manually initialize the first control plane:
+**Manual cluster initialization** (after running playbooks):
 
 ```bash
 # SSH to first control plane
@@ -95,7 +107,7 @@ sudo kubeadm init \
   --upload-certs \
   --pod-network-cidr=10.244.0.0/16
 
-# Configure kubectl for user a1
+# Configure kubectl
 mkdir -p $HOME/.kube
 sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
@@ -103,115 +115,110 @@ sudo chown $(id -u):$(id -g) $HOME/.kube/config
 # Install Calico CNI
 kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.31.0/manifests/calico.yaml
 
-# Verify
-kubectl get nodes
-kubectl get pods -n kube-system
+# Get join commands
+kubeadm token create --print-join-command  # For workers
+sudo kubeadm init phase upload-certs --upload-certs  # For control planes
 ```
 
-### Step 2: Join Additional Nodes to Cluster
+See full K8s setup guide in CLAUDE.md or original README sections.
 
-Now join the remaining control planes and workers.
+### Grafana Stack (grafana-stack/)
 
-#### Get Join Tokens (on k8s-cp1)
+Monitoring infrastructure with Grafana, Prometheus, Loki, AlertManager, and Proxmox PVE Exporter.
 
+**Deployment options:**
+
+1. **Automated (Ansible)**: `ansible-playbook grafana-stack/grafana-stack-setup.yml`
+2. **Manual (Bash)**: `./grafana-stack/grafana-stack-manual-setup.sh` (for learning)
+
+**Service versions:**
+- Grafana: 12.3.0
+- Prometheus: 3.7.3 (15-day retention)
+- Loki: 3.6.0 (7-day retention)
+- AlertManager: 0.29.0
+
+**Post-installation:**
+- Access Grafana at http://192.168.100.40:3000 (admin/admin)
+- Configure Proxmox credentials in `/etc/prometheus-pve-exporter/pve.yml`
+- Import dashboards (Proxmox: 10347, JMeter: 13865)
+
+See `grafana-stack/docs/` for detailed guides.
+
+### JMeter (jmeter/)
+
+Apache JMeter load testing server with Prometheus metrics integration.
+
+**Components:**
+- JMeter 5.6.3 with plugins (Standard, Extras, WebDriver, Hadoop)
+- Prometheus JMeter plugin for real-time metrics
+- Sample test plans in `tests/`
+
+**Usage:**
 ```bash
-# SSH to first control plane
-ssh a1@192.168.100.11
+# Non-GUI mode (recommended)
+jmeter -n -t test.jmx -l results.jtl
 
-# Get worker join command
-kubeadm token create --print-join-command
-# Output: kubeadm join 192.168.100.10:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash>
-
-# Get certificate key for control planes (requires sudo)
-sudo kubeadm init phase upload-certs --upload-certs
-# Output: certificate key: <cert-key>
+# With Prometheus metrics export
+jmeter -n -t jmeter-prometheus-test.jmx -l results.jtl
+# Metrics available at http://192.168.100.23:9270/metrics
 ```
 
-#### Join Additional Control Planes (k8s-cp2, k8s-cp3)
+See `jmeter/docs/JMETER_QUICK_START.md` for 5-minute guide.
 
+### Rancher (rancher/)
+
+Kubernetes management platform (K3s-based).
+
+**Installation:**
+- Deployed on k8s-jump (192.168.100.19)
+- Access at https://192.168.100.19
+- Includes local path provisioner for storage
+
+### LXC Utilities (lxc/)
+
+Helpers for setting up Debian-based LXC containers.
+
+**lxc-initial-setup.yml**: Bootstrap new containers with:
+- Network configuration
+- SSH server
+- Essential packages (python3, sudo, curl)
+- Locale configuration
+
+**setup-lxc-network.sh**: Standalone script for manual network setup
+
+**Note**: LXC containers don't use cloud-init like VMs. Network must be configured manually.
+
+## Common Tasks
+
+### Update Inventory
+Edit `inventory.yml` to change host IPs or add new hosts.
+
+### Reset Kubernetes
 ```bash
-# SSH to each control plane node
-ssh a1@192.168.100.12  # or .13
-
-# Run join command with control-plane flags
-sudo kubeadm join 192.168.100.10:6443 \
-  --token l4fjx5.xq3df3ljlobhxmuj \
-  --discovery-token-ca-cert-hash sha256:a663d8ed907bf67f70d4ccf949665c3e80816bb19c0cf0eb1a366e2b111d40d5 \
-  --control-plane \
-  --certificate-key 23e6c8b4715508860e6c8071b706aa1e0ebb2a41eaba8bb1fd386a6deea35c1d
+ansible-playbook k8s/k8s-reset.yml
+ansible-playbook k8s/k8s-reset.yml -e "reboot_after_reset=false"  # Skip reboot
 ```
 
-**Note**: Replace `--token`, `--discovery-token-ca-cert-hash`, and `--certificate-key` with YOUR actual values from Step 1.
-
-#### Join Worker Nodes (k8s-worker4, k8s-worker5, k8s-worker6)
-
+### Check Grafana Stack Status
 ```bash
-# SSH to each worker node
-ssh a1@192.168.100.14  # or .15, .16
-
-# Run join command WITHOUT control-plane flags
-sudo kubeadm join 192.168.100.10:6443 \
-  --token l4fjx5.xq3df3ljlobhxmuj \
-  --discovery-token-ca-cert-hash sha256:a663d8ed907bf67f70d4ccf949665c3e80816bb19c0cf0eb1a366e2b111d40d5
+ansible grafana_stack -m shell -a "systemctl status grafana-server prometheus loki alertmanager --no-pager"
 ```
 
-**Note**: Replace `--token` and `--discovery-token-ca-cert-hash` with YOUR actual values from Step 1.
-
-### Step 3: Verify Cluster
-
+### View Service Logs
 ```bash
-# On k8s-cp1
-kubectl get nodes
-
-# Should show all 6 nodes:
-# - k8s-cp1, k8s-cp2, k8s-cp3 (control planes - Ready, control-plane)
-# - k8s-worker4, k8s-worker5, k8s-worker6 (workers - Ready)
-# Note: Load balancer (k8s-lb) and jump server (k8s-jump) are NOT Kubernetes nodes
+ansible <host> -m shell -a "journalctl -u <service-name> -n 50 --no-pager"
 ```
 
-### Step 4: Setup Jump Server Access (Optional)
+## Documentation
 
-Copy kubeconfig to jump server for remote cluster management:
+- **Kubernetes**: See CLAUDE.md for detailed cluster setup
+- **Grafana Stack**: See `grafana-stack/docs/GRAFANA_STACK_DEPLOYMENT.md`
+- **JMeter**: See `jmeter/docs/JMETER_QUICK_START.md`
+- **LXC**: See `LXC_MANUAL_SETUP_GUIDE.md` (project root)
 
-```bash
-# From your local machine or k8s-cp1
-scp a1@192.168.100.11:~/.kube/config ~/.kube/config-k8s
+## Customization
 
-# Then SSH to jump server
-ssh a1@192.168.100.19
-
-# On jump server, copy the kubeconfig
-scp a1@192.168.100.11:~/.kube/config ~/.kube/config
-
-# Test kubectl access
-kubectl get nodes
-kubectl get pods -A
-```
-
-### Token Expiration
-
-Tokens expire after 24 hours. If your tokens expire, generate new ones:
-
-```bash
-# On k8s-cp1
-kubeadm token create --print-join-command  # New worker token
-sudo kubeadm init phase upload-certs --upload-certs  # New cert key
-```
-
-## Reset Kubernetes Cluster
-
-If you want to start over without destroying VMs in Terraform:
-
-```bash
-# Reset all Kubernetes nodes (CAUTION: Destroys cluster!)
-ansible-playbook reset-k8s.yml
-
-# Skip reboot (faster, but not as clean)
-ansible-playbook reset-k8s.yml -e "reboot_after_reset=false"
-```
-
-After reset, you can re-run the setup:
-```bash
-ansible-playbook setup-k8s.yml
-# Then follow manual initialization steps above
-```
+- **Change IPs**: Edit `inventory.yml`
+- **Change K8s versions**: Edit version variables in `k8s/k8s-setup.yml`
+- **Change monitoring retention**: Edit `grafana-stack/grafana-stack-setup.yml`
+- **Add Prometheus targets**: Edit `/etc/prometheus/prometheus.yml` on grafana-stack

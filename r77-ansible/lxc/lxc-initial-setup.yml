@@ -1,0 +1,136 @@
+---
+# LXC Container Initial Setup
+# Configures networking, SSH, and basic system setup for Debian LXC containers
+# Run this BEFORE the main application setup playbook
+
+- name: Initial LXC Container Setup
+  hosts: "{{ target_host | default('grafana_stack') }}"
+  gather_facts: no
+
+  vars:
+    container_ip: "{{ ansible_host }}"
+    container_gateway: "192.168.100.1"
+    container_hostname: "{{ inventory_hostname }}"
+
+  tasks:
+    - name: Wait for container to be accessible via console
+      delegate_to: localhost
+      wait_for:
+        timeout: 5
+      changed_when: false
+
+    - name: Configure network interface (via raw commands)
+      raw: |
+        cat > /etc/network/interfaces << 'EOF'
+        # Loopback interface
+        auto lo
+        iface lo inet loopback
+
+        # Primary network interface
+        auto eth0
+        iface eth0 inet static
+            address {{ container_ip }}
+            netmask 255.255.255.0
+            gateway {{ container_gateway }}
+            dns-nameservers 8.8.8.8 8.8.4.4
+        EOF
+      changed_when: true
+
+    - name: Bring up network interface
+      raw: ip link set eth0 up && ifup eth0
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Set hostname
+      raw: |
+        echo "{{ container_hostname }}" > /etc/hostname
+        hostname {{ container_hostname }}
+      changed_when: true
+
+    - name: Update /etc/hosts
+      raw: |
+        cat > /etc/hosts << 'EOF'
+        127.0.0.1       localhost
+        {{ container_ip }}    {{ container_hostname }}
+
+        # The following lines are desirable for IPv6 capable hosts
+        ::1     localhost ip6-localhost ip6-loopback
+        ff02::1 ip6-allnodes
+        ff02::2 ip6-allrouters
+        EOF
+      changed_when: true
+
+    - name: Update apt cache
+      raw: apt-get update
+      changed_when: true
+
+    - name: Install essential packages
+      raw: apt-get install -y openssh-server python3 sudo curl wget locales
+      changed_when: true
+
+    - name: Configure locale
+      raw: |
+        echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+        locale-gen
+        update-locale LANG=en_US.UTF-8
+      changed_when: true
+      ignore_errors: yes
+
+    - name: Enable and start SSH service
+      raw: systemctl enable ssh && systemctl start ssh
+      changed_when: true
+
+    - name: Create .ssh directory for root
+      raw: mkdir -p /root/.ssh && chmod 700 /root/.ssh
+      changed_when: true
+
+    - name: Wait for system to stabilize
+      delegate_to: localhost
+      wait_for:
+        timeout: 3
+      changed_when: false
+
+    - name: Display network configuration
+      raw: ip addr show eth0
+      register: network_info
+      changed_when: false
+
+    - name: Show network info
+      debug:
+        var: network_info.stdout_lines
+      when: network_info.stdout_lines is defined
+
+    - name: Test SSH service
+      raw: systemctl status ssh --no-pager
+      register: ssh_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Show SSH status
+      debug:
+        var: ssh_status.stdout_lines
+      when: ssh_status.stdout_lines is defined
+
+    - name: Final instructions
+      debug:
+        msg:
+          - "============================================="
+          - "Initial Container Setup Complete!"
+          - "============================================="
+          - ""
+          - "Container: {{ container_hostname }}"
+          - "IP Address: {{ container_ip }}"
+          - ""
+          - "Next Steps:"
+          - "1. Copy your SSH public key to the container:"
+          - "   cat ~/.ssh/vm-deb13.pub | ssh root@{{ container_ip }} 'cat >> /root/.ssh/authorized_keys'"
+          - ""
+          - "2. Or manually from Proxmox host:"
+          - "   pct exec 140 -- bash -c 'mkdir -p /root/.ssh && cat > /root/.ssh/authorized_keys' < ~/.ssh/vm-deb13.pub"
+          - ""
+          - "3. Test SSH connection:"
+          - "   ssh -i ~/.ssh/vm-deb13 root@{{ container_ip }}"
+          - ""
+          - "4. Then run the main setup playbook:"
+          - "   ansible-playbook grafana-stack-setup.yml"
+          - "============================================="

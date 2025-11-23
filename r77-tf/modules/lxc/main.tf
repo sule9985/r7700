@@ -74,8 +74,8 @@ resource "proxmox_virtual_environment_container" "container" {
   }
 
   # Lifecycle
-  started = var.start_after_create
-  on_boot = var.start_on_boot
+  started        = var.start_after_create
+  start_on_boot  = var.start_on_boot
 
   tags = var.tags != "" ? split(",", var.tags) : []
 }

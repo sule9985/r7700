@@ -20,7 +20,7 @@ provider "proxmox" {
 # Data Sources
 # ============================================================================
 data "local_file" "ssh_public_key" {
-  filename = "${path.root}/../../keys/vm-deb13.pub"
+  filename = pathexpand("~/.ssh/vm-deb13.pub")
 }
 
 # ============================================================================

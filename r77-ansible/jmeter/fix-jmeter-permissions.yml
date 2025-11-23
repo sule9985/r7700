@@ -1,0 +1,74 @@
+---
+# ============================================================================
+# Fix JMeter Permissions - Quick Fix Playbook
+# ============================================================================
+# This playbook fixes permission issues on existing JMeter installations
+# Run this if you're getting "Permission denied" errors when running JMeter
+#
+# Usage:
+#   ansible-playbook fix-jmeter-permissions.yml
+
+- name: Fix JMeter File Permissions
+  hosts: jmeter
+  become: true
+
+  vars:
+    jmeter_install_dir: "/opt/jmeter"
+    jmeter_tests_dir: "/opt/jmeter-tests"
+    jmeter_results_dir: "/opt/jmeter-results"
+    jmeter_reports_dir: "/opt/jmeter-reports"
+
+  tasks:
+    - name: Set ownership of JMeter installation directory
+      file:
+        path: "{{ jmeter_install_dir }}"
+        owner: a1
+        group: a1
+        recurse: yes
+        state: directory
+      # Why: Allow a1 user to write logs and modify JMeter files
+
+    - name: Ensure JMeter working directories have correct ownership
+      file:
+        path: "{{ item }}"
+        owner: a1
+        group: a1
+        recurse: yes
+        state: directory
+      loop:
+        - "{{ jmeter_tests_dir }}"
+        - "{{ jmeter_results_dir }}"
+        - "{{ jmeter_reports_dir }}"
+      # Why: Ensure a1 can write test results and reports
+
+    - name: Make JMeter scripts executable
+      file:
+        path: "{{ jmeter_install_dir }}/bin/{{ item }}"
+        mode: '0755'
+      loop:
+        - jmeter
+        - jmeter-server
+      # Why: Ensure scripts can be executed
+
+    - name: Fix ownership of jmeter.log in home directory
+      file:
+        path: /home/a1/jmeter.log
+        owner: a1
+        group: a1
+        state: file
+      ignore_errors: yes
+      # Why: JMeter may create log file in home directory
+      # ignore_errors: file might not exist yet
+
+    - name: Display completion message
+      debug:
+        msg:
+          - "=========================================="
+          - "✅ JMeter Permissions Fixed!"
+          - "=========================================="
+          - ""
+          - "You can now run JMeter as user a1:"
+          - "  jmeter -n -t /opt/jmeter-tests/jmeter-sample-test.jmx -l results.jtl"
+          - ""
+          - "Log file will be written to:"
+          - "  /opt/jmeter/bin/jmeter.log"

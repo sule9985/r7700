@@ -1,0 +1,64 @@
+# ============================================================================
+# Grafana Component - Terraform Variables Example
+# ============================================================================
+# Copy this file to terraform.tfvars and fill in your actual values
+# terraform.tfvars is gitignored to protect sensitive data
+
+# ============================================================================
+# Proxmox Connection (REQUIRED)
+# ============================================================================
+
+# Proxmox API URL
+proxmox_api_url = "https://192.168.100.4:8006"
+
+# Proxmox API token (format: user@pam!tokenname=secret)
+proxmox_api_token_id = "root@pam!terraform=your-secret-token-here"
+
+# Skip TLS verification for self-signed certificates
+proxmox_tls_insecure = true
+
+# ============================================================================
+# Infrastructure Configuration
+# ============================================================================
+
+# Proxmox node name
+proxmox_node = "pve"
+
+# Storage pool for VM disks
+storage_name = "local-zfs"
+
+# Template VMID (Debian 13 cloud-init template)
+template_id = 998
+
+# Network bridge
+network_bridge = "vmbr0"
+
+# ============================================================================
+# Network Configuration
+# ============================================================================
+
+# Default gateway
+gateway = "192.168.100.1"
+
+# DNS servers
+dns_servers = ["8.8.8.8", "8.8.4.4"]
+
+# ============================================================================
+# Grafana VM Configuration
+# ============================================================================
+
+# Grafana VM ID (must be unique across Proxmox)
+grafana_vm_id = 121
+
+# Grafana hostname
+grafana_hostname = "grafana"
+
+# Grafana IP address (without CIDR notation)
+grafana_ip = "192.168.100.21"
+
+# ============================================================================
+# Cloud-init Configuration
+# ============================================================================
+
+# Default user (configured in cloud-init template)
+cloud_init_user = "a1"

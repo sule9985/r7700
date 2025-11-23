@@ -24,7 +24,7 @@ provider "proxmox" {
 
 # SSH public key for VM access
 data "local_file" "ssh_public_key" {
-  filename = "${path.root}/../../keys/vm-deb13.pub"
+  filename = pathexpand("~/.ssh/vm-deb13.pub")
 }
 
 # Load Balancer VM for Kubernetes API

@@ -1,0 +1,18 @@
+Hi, please create me a new TF component named: gitlab
+- CPU: 4, RAM: 8GB, Storage: 40GB
+- ip address: 192.168.100.22
+---
+Then create a new playbook to setup the gitlab VM on Debian 13:
+- DNS should be: gitlab.garage.dirty-hands.work
+- Install UFW
+sudo systemctl enable --now ssh
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+
+- Add the GitLab package repository
+sudo apt install -y curl
+
+curl "https://packages.gitlab.com/install/repositories/gitlab/gitlab-ee/script.deb.sh" | sudo bash
+

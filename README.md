@@ -8,33 +8,37 @@ This project provisions and configures a complete Kubernetes infrastructure on P
 
 - **8 VMs total**: 1 load balancer, 3 control planes, 3 workers, 1 jump server
 - **1 Rancher server**: K3s-based management platform
+- **1 Grafana server**: Multi-platform monitoring with Prometheus and Loki
+- **1 JMeter server**: Load testing and performance testing
 - **High Availability**: 3 control plane nodes behind nginx load balancer
 - **Network**: 192.168.100.0/24 subnet
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Proxmox Host (192.168.100.4)                                    │
-│                                                                  │
-│  ┌──────────────┐         ┌─────────────────────────────────┐  │
-│  │ Jump Server  │────────▶│ K8s Cluster (HA)                │  │
-│  │ .19          │         │  ┌──────────────┐               │  │
-│  └──────────────┘         │  │ Load Balancer│               │  │
-│                           │  │ .10 (nginx)  │               │  │
-│  ┌──────────────┐         │  └──────┬───────┘               │  │
-│  │ Rancher      │         │         │                        │  │
-│  │ .20 (K3s)    │◀────────┤  ┌──────▼───────────────────┐   │  │
-│  └──────────────┘         │  │ Control Planes (3)       │   │  │
-│                           │  │ .11, .12, .13 (kubeadm)  │   │  │
-│                           │  └──────┬───────────────────┘   │  │
-│                           │         │                        │  │
-│                           │  ┌──────▼───────────────────┐   │  │
-│                           │  │ Workers (3)              │   │  │
-│                           │  │ .14, .15, .16            │   │  │
-│                           │  └──────────────────────────┘   │  │
-│                           └─────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│ Proxmox Host (192.168.100.4)                                          │
+│                                                                        │
+│  ┌──────────────┐         ┌─────────────────────────────────┐        │
+│  │ Jump Server  │────────▶│ K8s Cluster (HA)                │        │
+│  │ .19          │         │  ┌──────────────┐               │        │
+│  └──────────────┘         │  │ Load Balancer│               │        │
+│                           │  │ .10 (nginx)  │               │        │
+│  ┌──────────────┐         │  └──────┬───────┘               │        │
+│  │ Rancher      │         │         │                        │        │
+│  │ .20 (K3s)    │◀────────┤  ┌──────▼───────────────────┐   │        │
+│  └──────────────┘         │  │ Control Planes (3)       │   │        │
+│                           │  │ .11, .12, .13 (kubeadm)  │   │        │
+│  ┌──────────────┐         │  └──────┬───────────────────┘   │        │
+│  │ Grafana      │◀────────┤         │                        │        │
+│  │ .21          │         │  ┌──────▼───────────────────┐   │        │
+│  │ Prometheus   │         │  │ Workers (3)              │   │        │
+│  │ Loki         │         │  │ .14, .15, .16            │   │        │
+│  └──────────────┘         │  └──────────────────────────┘   │        │
+│       │                   └─────────────────────────────────┘        │
+│       └──────────────────────────────────────────────────────────────┤
+│                  Monitors: K8s + AWS VMs + DO VMs                    │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Components
@@ -49,6 +53,8 @@ Provisions VMs and LXC containers on Proxmox using the **bpg/proxmox** provider.
 - `components/k8s-cluster/` - Main K8s cluster (7 VMs)
 - `components/k8s-jump/` - Jump server (1 VM)
 - `components/k8s-rancher/` - Rancher management server (1 VM)
+- `components/grafana/` - Grafana monitoring stack (1 VM)
+- `components/jmeter/` - JMeter load testing server (1 VM)
 
 [📖 Terraform Documentation](r77-tf/README.md)
 
@@ -61,6 +67,9 @@ Configures VMs using Ansible playbooks.
 - `setup-lb.yml` - Configure nginx load balancer
 - `setup-k8s.yml` - Prepare K8s nodes (containerd, kubeadm, kubelet)
 - `rancher-setup.yml` - Install K3s + Rancher
+- `grafana-setup.yml` - Install Grafana, Prometheus, and Loki monitoring stack
+- `jmeter-setup.yml` - Install Apache JMeter for load testing
+- `install-nginx-ingress.yml` - Install nginx-ingress controller for Rancher
 - `reset-k8s.yml` - Destroy cluster (for starting over)
 
 [📖 Ansible Documentation](r77-ansible/README.md)
@@ -103,6 +112,16 @@ terraform apply
 cd ../k8s-rancher
 terraform init
 terraform apply
+
+# Deploy Grafana monitoring server
+cd ../grafana
+terraform init
+terraform apply
+
+# Deploy JMeter load testing server
+cd ../jmeter
+terraform init
+terraform apply
 ```
 
 ### 3. Configure with Ansible
@@ -119,6 +138,8 @@ ansible-playbook setup-lb.yml
 ansible-playbook setup-k8s.yml
 ansible-playbook rancher-setup.yml
 ansible-playbook install-nginx-ingress.yml
+ansible-playbook grafana-setup.yml
+ansible-playbook jmeter-setup.yml
 ```
 
 ### 4. Initialize Kubernetes Cluster
@@ -162,6 +183,34 @@ https://192.168.100.20.sslip.io
 # (Change immediately after first login!)
 ```
 
+### 7. Access Grafana
+
+```bash
+# Access Grafana in browser
+http://192.168.100.21:3000
+
+# Default credentials
+# Username: admin
+# Password: admin (change on first login!)
+
+# Also available:
+# Prometheus: http://192.168.100.21:9090
+# Loki API:   http://192.168.100.21:3100
+```
+
+### 8. Access JMeter
+
+```bash
+# SSH to JMeter server
+ssh a1@192.168.100.23
+
+# Run sample test
+jmeter-run /opt/jmeter-tests/sample-http-test.jmx 50 300
+
+# Prometheus metrics
+http://192.168.100.23:9270/metrics
+```
+
 ## Network Layout
 
 | Component           | Hostname      | IP Address      | VMID | Resources           |
@@ -175,6 +224,8 @@ https://192.168.100.20.sslip.io
 | Worker 6            | k8s-worker6   | 192.168.100.16  | 116  | 2 CPU, 4GB, 50GB    |
 | Jump Server         | k8s-jump      | 192.168.100.19  | 119  | 1 CPU, 1GB, 8GB     |
 | Rancher             | k8s-rancher   | 192.168.100.20  | 120  | 4 CPU, 6GB, 60GB    |
+| Grafana Monitoring  | grafana       | 192.168.100.21  | 121  | 4 CPU, 4GB, 60GB    |
+| JMeter Load Testing | jmeter        | 192.168.100.23  | 123  | 16 CPU, 32GB, 80GB  |
 
 **Gateway**: 192.168.100.3
 **DNS**: 8.8.8.8, 8.8.4.4
@@ -192,8 +243,11 @@ https://192.168.100.20.sslip.io
 - **Calico v3.31.0** - CNI network plugin
 - **containerd** - Container runtime
 
-### Management
+### Management & Monitoring
 - **Rancher v2.12.3** - Multi-cluster management UI
+- **Grafana v11.4.0** - Visualization and dashboarding
+- **Prometheus v3.1.0** - Metrics collection and alerting
+- **Loki v3.3.2** - Log aggregation
 - **nginx** - Load balancer for K8s API
 - **nginx-ingress v1.14.0** - Ingress controller for Rancher
 - **cert-manager v1.19.1** - Certificate management
@@ -214,7 +268,8 @@ r7700/
 │   └── components/              # Deployment components
 │       ├── k8s-cluster/         # Main K8s cluster (7 VMs)
 │       ├── k8s-jump/            # Jump server
-│       └── k8s-rancher/         # Rancher server
+│       ├── k8s-rancher/         # Rancher server
+│       └── grafana/             # Grafana monitoring stack
 │
 └── r77-ansible/                 # Ansible configuration
     ├── ansible.cfg              # Ansible settings
@@ -223,6 +278,7 @@ r7700/
     ├── setup-lb.yml             # Load balancer setup
     ├── setup-k8s.yml            # K8s cluster setup
     ├── rancher-setup.yml        # Rancher installation
+    ├── grafana-setup.yml        # Grafana monitoring stack
     ├── install-nginx-ingress.yml # Ingress controller
     ├── reset-k8s.yml            # Cluster reset
     └── scripts/                 # Bash scripts
@@ -250,6 +306,9 @@ ssh a1@192.168.100.16  # worker6
 
 # Rancher
 ssh a1@192.168.100.20
+
+# Grafana monitoring
+ssh a1@192.168.100.21
 ```
 
 ### Cluster Management

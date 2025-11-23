@@ -1,0 +1,1047 @@
+---
+# ============================================================================
+# Grafana Monitoring Stack Setup - Comprehensive Installation
+# ============================================================================
+# This playbook automates the complete setup of a monitoring stack including:
+# - Docker & Docker Compose: Container runtime for all services
+# - Grafana: Visualization dashboards and alerting UI
+# - Prometheus: Time-series metrics database and query engine
+# - Loki: Log aggregation system (lightweight alternative to ELK)
+# - Alertmanager: Alert routing and notification manager (Slack, email, etc.)
+#
+# Target hosts: grafana (192.168.100.21)
+# Prerequisites: Debian 13 VM with SSH access
+#
+# Usage:
+#   ansible-playbook grafana-setup.yml
+#
+# Post-installation:
+#   - Grafana:       http://192.168.100.21:3000 (admin/admin)
+#   - Prometheus:    http://192.168.100.21:9090
+#   - Alertmanager:  http://192.168.100.21:9093
+#   - Loki:          http://192.168.100.21:3100
+
+- name: Setup Grafana Monitoring Stack with Alertmanager
+  hosts: grafana  # Target the grafana group from inventory.yml
+  become: true    # Run all tasks with sudo privileges
+
+  vars:
+    # === Version Configuration ===
+    # Using specific versions ensures reproducible deployments
+    grafana_version: "12.2.1"           # Latest Grafana (Dec 2024)
+    prometheus_version: "v3.7.3"        # Latest Prometheus LTS
+    loki_version: "3.5"                 # Latest Loki stable
+    alertmanager_version: "v0.28.1"     # Latest Alertmanager
+    docker_compose_version: "v2.40.3"   # Docker Compose CLI plugin version
+
+    # === Directory Structure ===
+    # All monitoring configs in /opt, data in /var/lib (standard Linux practice)
+    grafana_config_dir: "/opt/grafana-stack"      # Config files (docker-compose, prometheus.yml, etc.)
+    prometheus_data_dir: "/var/lib/prometheus"    # Prometheus time-series database
+    loki_data_dir: "/var/lib/loki"                # Loki log chunks and indexes
+    grafana_data_dir: "/var/lib/grafana"          # Grafana dashboards and settings
+    alertmanager_data_dir: "/var/lib/alertmanager"  # Alertmanager state and silences
+
+    # === Slack Configuration (REPLACE WITH YOUR VALUES) ===
+    # Get webhook URL from: https://api.slack.com/messaging/webhooks
+    slack_webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+    slack_channel: "#monitoring-alerts"           # Slack channel for alerts
+
+  tasks:
+    # ========================================================================
+    # PHASE 1: System Preparation
+    # ========================================================================
+    # Ensure system is up-to-date and has required packages for Docker installation
+
+    - name: Update apt package cache
+      apt:
+        update_cache: yes           # Equivalent to 'apt update'
+        cache_valid_time: 3600      # Only update if cache is older than 1 hour
+      # Why: Ensures we get latest package information without excessive updates
+
+    - name: Install system prerequisites
+      apt:
+        name:
+          - apt-transport-https     # Allows apt to retrieve packages via HTTPS
+          - ca-certificates         # Common CA certificates for SSL verification
+          - curl                    # Download tool for fetching GPG keys
+          - gnupg                   # GNU Privacy Guard for key verification
+          - lsb-release            # Provides distro information for Docker repo
+          - ufw                     # Uncomplicated Firewall for port management
+        state: present              # Ensure packages are installed (won't reinstall if present)
+      # Why: These are required dependencies for Docker repository setup
+
+    # ========================================================================
+    # PHASE 2: Docker Installation
+    # ========================================================================
+    # Install Docker CE (Community Edition) from official Docker repository
+    # We use official Docker repo instead of Debian's because it has newer versions
+
+    # Create directory with specific permissions (755 = rwxr-xr-x)
+    # Download Docker's official GPG key and convert to binary format
+    # Make key readable by all users (required for apt)
+    - name: Create directory for apt keyrings and add Docker GPG key
+      shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+      # Why: GPG key verifies authenticity of Docker packages during installation
+
+    # Construct repo URL with correct architecture (amd64, arm64, etc.) and Debian version
+    - name: Add Docker official repository to apt sources
+      shell: |
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
+      # Why: Adds Docker's official repository so we can install docker-ce
+
+    - name: Update apt cache after adding Docker repository
+      apt:
+        update_cache: yes  # Refresh package list to include Docker packages
+      # Why: Make newly added Docker packages available for installation
+
+    - name: Install Docker Engine and related components
+      apt:
+        name:
+          - docker-ce              # Docker Engine (core container runtime)
+          - docker-ce-cli          # Docker command-line interface
+          - containerd.io          # Container runtime (what actually runs containers)
+          - docker-buildx-plugin   # Docker build extension for multi-platform builds
+          - docker-compose-plugin  # Docker Compose V2 (for managing multi-container apps)
+        state: present
+      # Why: These packages provide complete Docker functionality
+
+    - name: Start Docker service and enable on boot
+      systemd:
+        name: docker
+        state: started   # Start the service now
+        enabled: yes     # Enable service to start automatically on system boot
+      # Why: Ensures Docker daemon is running and persists across reboots
+
+    - name: Add 'a1' user to docker group
+      user:
+        name: a1
+        groups: docker
+        append: yes      # Add to group without removing other groups
+      # Why: Allows 'a1' user to run docker commands without sudo
+      # Note: User needs to log out/in for group change to take effect
+
+    # Reset SSH connection to pick up new group membership
+    - name: Reset connection to apply docker group membership
+      meta: reset_connection
+      # Why: The docker group won't be active in the current session
+      # This forces Ansible to reconnect, picking up the new group
+
+    # ========================================================================
+    # PHASE 3: Directory Structure Setup
+    # ========================================================================
+    # Create organized directory structure for configs and persistent data
+
+    - name: Create configuration directory for monitoring stack
+      file:
+        path: "{{ grafana_config_dir }}"  # /opt/grafana-stack
+        state: directory                   # Ensure it's a directory
+        owner: a1                          # Owned by a1 user
+        group: a1                          # Owned by a1 group
+        mode: '0755'                       # Permissions: rwxr-xr-x
+      # Why: Central location for all docker-compose and config files
+
+    - name: Create persistent data directories for each service
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"  # Use service-specific UIDs for security
+        group: "{{ item.owner }}"
+        mode: '0755'
+      loop:
+        - { path: "{{ prometheus_data_dir }}", owner: "65534" }     # nobody user (Prometheus default)
+        - { path: "{{ loki_data_dir }}", owner: "10001" }          # loki user (Loki default UID)
+        - { path: "{{ grafana_data_dir }}", owner: "472" }         # grafana user (Grafana default UID)
+        - { path: "{{ alertmanager_data_dir }}", owner: "65534" }  # nobody user (Alertmanager default)
+      # Why: Each service runs as non-root user with specific UID
+      # These directories persist data across container restarts
+
+    # ========================================================================
+    # PHASE 4: Docker Compose Configuration
+    # ========================================================================
+    # Create docker-compose.yml defining all monitoring services
+
+    - name: Create Docker Compose file for monitoring stack
+      copy:
+        dest: "{{ grafana_config_dir }}/docker-compose.yml"
+        content: |
+          # Docker Compose v3.8 format (supports all features we need)
+          version: '3.8'
+
+          # === Networks ===
+          # Create isolated bridge network for service communication
+          networks:
+            monitoring:
+              driver: bridge  # Default bridge driver for container networking
+
+          # === Volumes ===
+          # Map host directories to containers for persistent storage
+          volumes:
+            prometheus-data:
+              driver: local
+              driver_opts:
+                type: none           # Use bind mount (not overlay)
+                o: bind              # Bind mount option
+                device: {{ prometheus_data_dir }}  # Host path
+            loki-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: {{ loki_data_dir }}
+            grafana-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: {{ grafana_data_dir }}
+            alertmanager-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: {{ alertmanager_data_dir }}
+
+          # === Services ===
+          services:
+
+            # --- Prometheus: Metrics Collection & Storage ---
+            prometheus:
+              image: prom/prometheus:{{ prometheus_version }}
+              container_name: prometheus
+              restart: unless-stopped  # Auto-restart unless manually stopped
+              user: "65534:65534"     # Run as nobody:nobody (non-root)
+              command:
+                # Configuration file location inside container
+                - '--config.file=/etc/prometheus/prometheus.yml'
+                # Where to store time-series data
+                - '--storage.tsdb.path=/prometheus'
+                # Keep metrics for 15 days (adjust based on disk space)
+                - '--storage.tsdb.retention.time=15d'
+                # Console libraries for web UI
+                - '--web.console.libraries=/etc/prometheus/console_libraries'
+                - '--web.console.templates=/etc/prometheus/consoles'
+                # Enable hot-reload of config via HTTP POST /-/reload
+                - '--web.enable-lifecycle'
+              ports:
+                - "9090:9090"  # Expose Prometheus web UI on host
+              volumes:
+                # Mount config file as read-only
+                - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+                # Mount alert rules directory
+                - ./prometheus-alerts:/etc/prometheus/alerts:ro
+                # Mount persistent data volume
+                - prometheus-data:/prometheus
+              networks:
+                - monitoring
+              # Why this service exists: Collects and stores metrics from all targets
+
+            # --- Alertmanager: Alert Routing & Notifications ---
+            alertmanager:
+              image: prom/alertmanager:{{ alertmanager_version }}
+              container_name: alertmanager
+              restart: unless-stopped
+              user: "65534:65534"  # Run as nobody:nobody
+              command:
+                # Configuration file for routing rules
+                - '--config.file=/etc/alertmanager/alertmanager.yml'
+                # Where to store alertmanager state (silences, etc.)
+                - '--storage.path=/alertmanager'
+              ports:
+                - "9093:9093"  # Alertmanager web UI
+              volumes:
+                # Mount alertmanager config
+                - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+                # Mount persistent data for silences
+                - alertmanager-data:/alertmanager
+              networks:
+                - monitoring
+              # Why this service exists: Receives alerts from Prometheus, deduplicates,
+              # groups them, and sends to notification channels (Slack, email, etc.)
+
+            # --- Loki: Log Aggregation ---
+            loki:
+              image: grafana/loki:{{ loki_version }}
+              container_name: loki
+              restart: unless-stopped
+              user: "10001:10001"  # Run as loki user
+              command:
+                - '-config.file=/etc/loki/local-config.yaml'
+              ports:
+                - "3100:3100"  # Loki API (for log ingestion and queries)
+              volumes:
+                # Mount Loki configuration
+                - ./loki-config.yml:/etc/loki/local-config.yaml:ro
+                # Mount persistent storage for log chunks
+                - loki-data:/loki
+              networks:
+                - monitoring
+              # Why this service exists: Stores and queries logs sent by Promtail agents
+
+            # --- Grafana: Visualization & Dashboards ---
+            grafana:
+              image: grafana/grafana:{{ grafana_version }}
+              container_name: grafana
+              restart: unless-stopped
+              user: "472:472"  # Run as grafana user
+              ports:
+                - "3000:3000"  # Grafana web UI
+              environment:
+                # Security: Change this password!
+                - GF_SECURITY_ADMIN_PASSWORD=admin
+                # Disable user self-registration
+                - GF_USERS_ALLOW_SIGN_UP=false
+                # Set the root URL for Grafana
+                - GF_SERVER_ROOT_URL=http://192.168.100.21:3000
+                # Auto-install useful plugins
+                - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-clock-panel
+              volumes:
+                # Mount persistent data for dashboards and settings
+                - grafana-data:/var/lib/grafana
+                # Auto-provision datasources on startup
+                - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+              depends_on:
+                - prometheus   # Wait for Prometheus to start
+                - loki        # Wait for Loki to start
+                - alertmanager # Wait for Alertmanager to start
+              networks:
+                - monitoring
+              # Why this service exists: Provides web UI for visualizing metrics
+              # and logs from Prometheus and Loki
+        owner: a1
+        group: a1
+        mode: '0644'
+      # Why: Docker Compose orchestrates all services with proper dependencies
+
+    # ========================================================================
+    # PHASE 5: Prometheus Configuration
+    # ========================================================================
+    # Configure Prometheus scrape targets and alert rules
+
+    - name: Create Prometheus configuration file
+      copy:
+        dest: "{{ grafana_config_dir }}/prometheus.yml"
+        content: |
+          # === Global Prometheus Settings ===
+          global:
+            # How often to scrape targets for metrics (15s is balanced)
+            scrape_interval: 15s
+            # How often to evaluate alert rules
+            evaluation_interval: 15s
+            # Labels attached to all time series and alerts
+            external_labels:
+              cluster: 'proxmox-monitoring'   # Cluster identifier
+              replica: 'prometheus-1'         # Prometheus instance identifier
+              environment: 'homelab'          # Environment tag
+
+          # === Alertmanager Integration ===
+          alerting:
+            alertmanagers:
+              - static_configs:
+                  - targets:
+                      - 'alertmanager:9093'  # Docker service name:port
+
+          # === Alert Rules ===
+          # Load alert rule files from this directory
+          rule_files:
+            - '/etc/prometheus/alerts/*.yml'
+
+          # === Scrape Configurations ===
+          # Define which targets to scrape and how often
+          scrape_configs:
+
+            # --- Self-Monitoring: Prometheus itself ---
+            - job_name: 'prometheus'
+              # Override global scrape_interval for this job
+              scrape_interval: 15s
+              static_configs:
+                - targets: ['localhost:9090']  # Scrape own metrics
+              # Why: Monitor Prometheus health and performance
+
+            # --- Alertmanager Monitoring ---
+            - job_name: 'alertmanager'
+              static_configs:
+                - targets: ['alertmanager:9093']
+              # Why: Monitor Alertmanager health
+
+            # ================================================================
+            # Kubernetes Cluster Monitoring (COMMENTED - Configure when ready)
+            # ================================================================
+            # Uncomment these sections when you're ready to monitor K8s
+            # Requires: Service account token and CA certificate
+
+            # # K8s API Server Metrics
+            # - job_name: 'kubernetes-apiservers'
+            #   kubernetes_sd_configs:
+            #     - role: endpoints
+            #       api_server: 'https://192.168.100.10:6443'
+            #       tls_config:
+            #         ca_file: /etc/prometheus/k8s-ca.crt
+            #         insecure_skip_verify: false
+            #       bearer_token_file: /etc/prometheus/k8s-token
+            #   relabel_configs:
+            #     # Keep only the default/kubernetes service endpoints
+            #     - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            #       action: keep
+            #       regex: default;kubernetes;https
+
+            # # K8s Node Metrics (kubelet)
+            # - job_name: 'kubernetes-nodes'
+            #   kubernetes_sd_configs:
+            #     - role: node
+            #       api_server: 'https://192.168.100.10:6443'
+            #       tls_config:
+            #         ca_file: /etc/prometheus/k8s-ca.crt
+            #       bearer_token_file: /etc/prometheus/k8s-token
+            #   relabel_configs:
+            #     # Use internal IP as instance label
+            #     - action: labelmap
+            #       regex: __meta_kubernetes_node_label_(.+)
+
+            # # K8s Pods with metrics endpoints
+            # - job_name: 'kubernetes-pods'
+            #   kubernetes_sd_configs:
+            #     - role: pod
+            #       api_server: 'https://192.168.100.10:6443'
+            #       tls_config:
+            #         ca_file: /etc/prometheus/k8s-ca.crt
+            #       bearer_token_file: /etc/prometheus/k8s-token
+            #   relabel_configs:
+            #     # Only scrape pods with prometheus.io/scrape annotation
+            #     - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            #       action: keep
+            #       regex: true
+            #     # Use custom scrape path if defined
+            #     - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            #       action: replace
+            #       target_label: __metrics_path__
+            #       regex: (.+)
+            #     # Use custom port if defined
+            #     - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            #       action: replace
+            #       regex: ([^:]+)(?::\d+)?;(\d+)
+            #       replacement: $1:$2
+            #       target_label: __address__
+
+            # ================================================================
+            # AWS VMs Monitoring (COMMENTED - Add your EC2 instances)
+            # ================================================================
+            # Requires: node_exporter running on port 9100
+
+            # - job_name: 'aws-ec2-instances'
+            #   static_configs:
+            #     - targets:
+            #         - 'ec2-1.example.com:9100'  # Replace with your EC2 hostname/IP
+            #         - 'ec2-2.example.com:9100'
+            #       labels:
+            #         env: 'production'
+            #         cloud: 'aws'
+            #         region: 'us-east-1'  # Add your AWS region
+
+            # ================================================================
+            # Digital Ocean VMs Monitoring (COMMENTED - Add your droplets)
+            # ================================================================
+            # Requires: node_exporter running on port 9100
+
+            # - job_name: 'digitalocean-droplets'
+            #   static_configs:
+            #     - targets:
+            #         - 'droplet-1.example.com:9100'  # Replace with droplet hostname/IP
+            #         - 'droplet-2.example.com:9100'
+            #       labels:
+            #         env: 'staging'
+            #         cloud: 'digitalocean'
+            #         region: 'nyc3'  # Add your DO region
+
+            # ================================================================
+            # Proxmox Local VMs Monitoring (COMMENTED - Add when ready)
+            # ================================================================
+            # Requires: Install node_exporter on each VM first
+            # Installation: See README.md for node_exporter setup
+
+            # - job_name: 'proxmox-infrastructure'
+            #   static_configs:
+            #     # Load Balancer
+            #     - targets: ['192.168.100.10:9100']
+            #       labels:
+            #         role: 'loadbalancer'
+            #         hostname: 'k8s-lb'
+            #     # Control Plane Nodes
+            #     - targets:
+            #         - '192.168.100.11:9100'
+            #         - '192.168.100.12:9100'
+            #         - '192.168.100.13:9100'
+            #       labels:
+            #         role: 'k8s-control-plane'
+            #     # Worker Nodes
+            #     - targets:
+            #         - '192.168.100.14:9100'
+            #         - '192.168.100.15:9100'
+            #         - '192.168.100.16:9100'
+            #       labels:
+            #         role: 'k8s-worker'
+            #     # Management Servers
+            #     - targets:
+            #         - '192.168.100.19:9100'  # Jump server
+            #       labels:
+            #         role: 'jump-server'
+            #         hostname: 'k8s-jump'
+            #     - targets:
+            #         - '192.168.100.20:9100'  # Rancher
+            #       labels:
+            #         role: 'rancher'
+            #         hostname: 'k8s-rancher'
+        owner: a1
+        group: a1
+        mode: '0644'
+      # Why: Defines what Prometheus monitors and how often
+
+    # ========================================================================
+    # PHASE 6: Alertmanager Configuration (Slack Integration)
+    # ========================================================================
+
+    - name: Create Alertmanager configuration with Slack integration
+      copy:
+        dest: "{{ grafana_config_dir }}/alertmanager.yml"
+        content: |
+          # === Alertmanager Configuration ===
+          # This file defines how alerts are routed and where they're sent
+
+          # === Global Settings ===
+          global:
+            # Default time to wait before sending notification (prevents flapping)
+            resolve_timeout: 5m
+            # Slack API URL (global default, can be overridden per receiver)
+            slack_api_url: '{{ slack_webhook_url }}'
+
+          # === Routing Rules ===
+          # Define how alerts are grouped and routed to different receivers
+          route:
+            # Default receiver if no routes match
+            receiver: 'slack-notifications'
+            # Group alerts by these labels (reduces notification spam)
+            group_by: ['alertname', 'cluster', 'service']
+            # Wait time before sending notification for new group (gather similar alerts)
+            group_wait: 10s
+            # Time to wait before sending update about existing group
+            group_interval: 5m
+            # Minimum time between two notifications for same group
+            repeat_interval: 4h
+
+            # === Child Routes (Specific Alert Handling) ===
+            routes:
+              # Critical alerts: Send immediately, repeat every hour
+              - match:
+                  severity: critical
+                receiver: 'slack-critical'
+                group_wait: 0s      # Send immediately
+                repeat_interval: 1h # Repeat every hour until resolved
+
+              # Warning alerts: Standard grouping, repeat every 4 hours
+              - match:
+                  severity: warning
+                receiver: 'slack-notifications'
+                repeat_interval: 4h
+
+              # Info alerts: Longer grouping, less frequent notifications
+              - match:
+                  severity: info
+                receiver: 'slack-notifications'
+                group_wait: 5m
+                repeat_interval: 12h
+
+          # === Inhibition Rules ===
+          # Suppress certain alerts when others are firing (prevent alert storms)
+          inhibit_rules:
+            # If critical alert is firing, suppress warnings for same alertname
+            - source_match:
+                severity: 'critical'
+              target_match:
+                severity: 'warning'
+              equal: ['alertname', 'instance']
+              # Why: No need to see "CPU High" warning if "Node Down" is already firing
+
+          # === Receivers (Notification Channels) ===
+          receivers:
+            # Default receiver: Send to general monitoring channel
+            - name: 'slack-notifications'
+              slack_configs:
+                - channel: '{{ slack_channel }}'  # e.g., #monitoring-alerts
+                  # Use default Slack webhook URL from global config
+                  send_resolved: true  # Send notification when alert resolves
+                  # Custom notification template
+                  title: '{% raw %}[{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}{% endraw %}'
+                  text: |
+                    {% raw %}*Alert:* {{ .GroupLabels.alertname }}
+                    *Severity:* {{ .CommonLabels.severity }}
+                    *Cluster:* {{ .CommonLabels.cluster }}
+                    *Summary:* {{ .CommonAnnotations.summary }}
+                    *Description:* {{ .CommonAnnotations.description }}
+
+                    *Details:*
+                    {{ range .Alerts }}
+                      • Instance: {{ .Labels.instance }}
+                        Status: {{ .Status }}
+                    {{ end }}{% endraw %}
+                  # Color-code by severity
+                  color: '{% raw %}{{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}danger{{ else if eq .CommonLabels.severity "warning" }}warning{{ else }}good{{ end }}{{ else }}good{{ end }}{% endraw %}'
+
+            # Critical alerts: Send to dedicated channel with @channel mention
+            - name: 'slack-critical'
+              slack_configs:
+                - channel: '{{ slack_channel }}'
+                  send_resolved: true
+                  # Mention @channel for critical alerts
+                  title: '{% raw %}🚨 [CRITICAL] {{ .GroupLabels.alertname }} 🚨{% endraw %}'
+                  text: |
+                    {% raw %}<!channel>
+
+                    *CRITICAL ALERT FIRING*
+
+                    *Alert:* {{ .GroupLabels.alertname }}
+                    *Cluster:* {{ .CommonLabels.cluster }}
+                    *Summary:* {{ .CommonAnnotations.summary }}
+                    *Description:* {{ .CommonAnnotations.description }}
+
+                    *Affected Instances:*
+                    {{ range .Alerts }}
+                      🔴 {{ .Labels.instance }} - {{ .Annotations.description }}
+                    {{ end }}
+
+                    *Action Required:* Immediate investigation needed!{% endraw %}
+                  color: 'danger'
+        owner: a1
+        group: a1
+        mode: '0644'
+      # Why: Routes alerts to Slack with appropriate formatting and urgency
+
+    # ========================================================================
+    # PHASE 7: Prometheus Alert Rules
+    # ========================================================================
+
+    - name: Create directory for Prometheus alert rules
+      file:
+        path: "{{ grafana_config_dir }}/prometheus-alerts"
+        state: directory
+        owner: a1
+        group: a1
+        mode: '0755'
+      # Why: Organize alert rules in separate files for better management
+
+    - name: Create common infrastructure alert rules
+      copy:
+        dest: "{{ grafana_config_dir }}/prometheus-alerts/infrastructure-alerts.yml"
+        content: |
+          # === Infrastructure Alert Rules ===
+          # These rules define when alerts should fire based on metric conditions
+
+          groups:
+            # Group: Node/Instance Health
+            - name: instance-health
+              interval: 30s  # Evaluate rules every 30 seconds
+              rules:
+                # Alert: Instance is down
+                - alert: InstanceDown
+                  # Expression: If target hasn't been scraped successfully in 5 minutes
+                  expr: up == 0
+                  for: 5m  # Must be true for 5 minutes before firing
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Instance {% raw %}{{ $labels.instance }}{% endraw %} is down"
+                    description: "{% raw %}{{ $labels.instance }}{% endraw %} of job {% raw %}{{ $labels.job }}{% endraw %} has been down for more than 5 minutes."
+
+                # Alert: Instance is flapping (up/down)
+                - alert: InstanceFlapping
+                  expr: changes(up[10m]) > 5
+                  for: 5m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "Instance {% raw %}{{ $labels.instance }}{% endraw %} is flapping"
+                    description: "Instance has changed state more than 5 times in 10 minutes."
+
+            # Group: CPU Alerts
+            - name: cpu-alerts
+              interval: 30s
+              rules:
+                # Alert: High CPU usage
+                - alert: HighCPUUsage
+                  # Expression: CPU usage > 80% for 5 minutes
+                  expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+                  for: 5m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "High CPU usage on {% raw %}{{ $labels.instance }}{% endraw %}"
+                    description: "CPU usage is above 80% (current: {% raw %}{{ $value }}{% endraw %}%)"
+
+                # Alert: Critical CPU usage
+                - alert: CriticalCPUUsage
+                  expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 95
+                  for: 2m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Critical CPU usage on {% raw %}{{ $labels.instance }}{% endraw %}"
+                    description: "CPU usage is critically high at {% raw %}{{ $value }}{% endraw %}%"
+
+            # Group: Memory Alerts
+            - name: memory-alerts
+              interval: 30s
+              rules:
+                # Alert: High memory usage
+                - alert: HighMemoryUsage
+                  # Expression: Memory usage > 80%
+                  expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 80
+                  for: 5m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "High memory usage on {% raw %}{{ $labels.instance }}{% endraw %}"
+                    description: "Memory usage is above 80% (current: {% raw %}{{ $value }}{% endraw %}%)"
+
+                # Alert: Critical memory usage
+                - alert: CriticalMemoryUsage
+                  expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 95
+                  for: 2m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Critical memory usage on {% raw %}{{ $labels.instance }}{% endraw %}"
+                    description: "Memory usage is critically high at {% raw %}{{ $value }}{% endraw %}%"
+
+            # Group: Disk Alerts
+            - name: disk-alerts
+              interval: 60s
+              rules:
+                # Alert: High disk usage
+                - alert: HighDiskUsage
+                  # Expression: Disk usage > 80% on any filesystem
+                  expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"} / node_filesystem_size_bytes)) * 100 > 80
+                  for: 10m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "High disk usage on {% raw %}{{ $labels.instance }}:{{ $labels.mountpoint }}{% endraw %}"
+                    description: "Disk usage is above 80% (current: {% raw %}{{ $value }}{% endraw %}%)"
+
+                # Alert: Critical disk usage
+                - alert: CriticalDiskUsage
+                  expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"} / node_filesystem_size_bytes)) * 100 > 90
+                  for: 5m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: "Critical disk usage on {% raw %}{{ $labels.instance }}:{{ $labels.mountpoint }}{% endraw %}"
+                    description: "Disk usage is critically high at {% raw %}{{ $value }}{% endraw %}%"
+
+                # Alert: Disk will fill in 4 hours (predictive)
+                - alert: DiskWillFillSoon
+                  # Predict disk full based on 6h growth trend
+                  expr: predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"}[6h], 4*3600) < 0
+                  for: 1h
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "Disk will fill soon on {% raw %}{{ $labels.instance }}:{{ $labels.mountpoint }}{% endraw %}"
+                    description: "Filesystem is predicted to fill within 4 hours based on current growth rate"
+
+            # Group: Prometheus Self-Monitoring
+            - name: prometheus-alerts
+              interval: 30s
+              rules:
+                # Alert: Prometheus is using too much memory
+                - alert: PrometheusHighMemory
+                  expr: process_resident_memory_bytes{job="prometheus"} > 1e9  # > 1GB
+                  for: 10m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "Prometheus is using high memory"
+                    description: "Prometheus memory usage is {% raw %}{{ $value | humanize }}{% endraw %}B"
+
+                # Alert: Too many time series in Prometheus
+                - alert: PrometheusTooManyTimeSeries
+                  expr: prometheus_tsdb_head_series > 100000
+                  for: 10m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: "Prometheus has too many time series"
+                    description: "Prometheus is tracking {% raw %}{{ $value }}{% endraw %} time series (consider reducing scrape targets or retention)"
+        owner: a1
+        group: a1
+        mode: '0644'
+      # Why: Defines conditions that trigger alerts (CPU, memory, disk, etc.)
+
+    # ========================================================================
+    # PHASE 8: Loki Configuration
+    # ========================================================================
+
+    - name: Create Loki configuration file
+      copy:
+        dest: "{{ grafana_config_dir }}/loki-config.yml"
+        content: |
+          # === Loki Configuration ===
+          # Loki stores and indexes logs sent by Promtail agents
+
+          # Disable authentication (for internal use only)
+          auth_enabled: false
+
+          # === Server Configuration ===
+          server:
+            http_listen_port: 3100  # HTTP API for log ingestion and queries
+            grpc_listen_port: 9096  # gRPC for high-performance ingestion
+
+          # === Common Configuration (Loki v3+) ===
+          common:
+            instance_addr: 127.0.0.1
+            path_prefix: /loki  # Base path for all Loki data
+            storage:
+              filesystem:
+                # Where to store log chunks (actual log data)
+                chunks_directory: /loki/chunks
+                # Where to store index (metadata for fast queries)
+                rules_directory: /loki/rules
+            replication_factor: 1  # Single instance (no replication)
+            ring:
+              kvstore:
+                store: inmemory  # Use in-memory key-value store (for single instance)
+
+          # === Query Performance ===
+          query_range:
+            results_cache:
+              cache:
+                embedded_cache:
+                  enabled: true
+                  max_size_mb: 100  # Cache up to 100MB of query results
+
+          # === Schema Configuration ===
+          schema_config:
+            configs:
+              - from: 2020-10-24
+                store: tsdb         # Use TSDB (time-series database) index
+                object_store: filesystem  # Store on local filesystem
+                schema: v13         # Latest schema version
+                index:
+                  prefix: index_
+                  period: 24h       # Create new index daily
+
+          # === Ruler (for log-based alerts) ===
+          ruler:
+            alertmanager_url: http://alertmanager:9093  # Send alerts here
+
+          # === Limits & Retention ===
+          limits_config:
+            # Retention period for logs
+            retention_period: 168h  # 7 days (adjust based on disk space)
+            # Rate limiting (prevent single client from overwhelming Loki)
+            ingestion_rate_mb: 10           # 10 MB/s per tenant
+            ingestion_burst_size_mb: 20     # Burst up to 20MB
+            per_stream_rate_limit: 5MB      # 5MB/s per log stream
+            per_stream_rate_limit_burst: 20MB  # Burst up to 20MB
+            # Query limits
+            max_query_length: 721h          # Max query time range (30 days)
+            max_query_lookback: 0           # No limit on lookback
+        owner: a1
+        group: a1
+        mode: '0644'
+      # Why: Configures Loki for log storage and querying
+
+    # ========================================================================
+    # PHASE 9: Grafana Datasources
+    # ========================================================================
+
+    - name: Create Grafana datasources provisioning file
+      copy:
+        dest: "{{ grafana_config_dir }}/grafana-datasources.yml"
+        content: |
+          # === Grafana Datasources Auto-Provisioning ===
+          # This file automatically adds datasources when Grafana starts
+          # No need to manually configure in UI!
+
+          apiVersion: 1
+
+          datasources:
+            # --- Prometheus Datasource ---
+            - name: Prometheus
+              type: prometheus
+              access: proxy  # Grafana server proxies requests (not browser)
+              url: http://prometheus:9090  # Docker service name
+              isDefault: true  # Make this the default datasource
+              jsonData:
+                timeInterval: 15s  # Match Prometheus scrape interval
+                queryTimeout: 60s  # Timeout for queries
+                httpMethod: POST   # Use POST for large queries
+              editable: true  # Allow editing in UI
+              # Why: Provides metrics data to Grafana
+
+            # --- Loki Datasource ---
+            - name: Loki
+              type: loki
+              access: proxy
+              url: http://loki:3100
+              jsonData:
+                maxLines: 1000  # Max log lines to return in single query
+                derivedFields:  # Extract fields from logs
+                  # Extract trace IDs if present (for distributed tracing)
+                  - datasourceUid: tempo
+                    matcherRegex: "traceID=(\\w+)"
+                    name: TraceID
+                    url: "$${__value.raw}"
+              editable: true
+              # Why: Provides log data to Grafana
+
+            # --- Alertmanager Datasource ---
+            - name: Alertmanager
+              type: alertmanager
+              access: proxy
+              url: http://alertmanager:9093
+              jsonData:
+                implementation: prometheus  # Use Prometheus Alertmanager
+              editable: true
+              # Why: Shows active alerts in Grafana dashboards
+        owner: a1
+        group: a1
+        mode: '0644'
+      # Why: Automatically configures Grafana to connect to data sources
+
+    # ========================================================================
+    # PHASE 10: Firewall Configuration
+    # ========================================================================
+    # Open required ports for monitoring services
+
+    - name: Configure UFW firewall to allow SSH
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+      # Why: Keep SSH access open (you need this to manage the server!)
+
+    - name: Allow Grafana web UI
+      ufw:
+        rule: allow
+        port: '3000'
+        proto: tcp
+        comment: 'Grafana Web UI'
+      # Why: Access Grafana dashboards from browser
+
+    - name: Allow Prometheus web UI
+      ufw:
+        rule: allow
+        port: '9090'
+        proto: tcp
+        comment: 'Prometheus Web UI'
+      # Why: Access Prometheus for debugging queries
+
+    - name: Allow Alertmanager web UI
+      ufw:
+        rule: allow
+        port: '9093'
+        proto: tcp
+        comment: 'Alertmanager Web UI'
+      # Why: View and manage alerts
+
+    - name: Allow Loki API
+      ufw:
+        rule: allow
+        port: '3100'
+        proto: tcp
+        comment: 'Loki API'
+      # Why: Allow Promtail agents to send logs
+
+    - name: Enable UFW firewall
+      ufw:
+        state: enabled
+      # Why: Activate firewall rules
+
+    # ========================================================================
+    # PHASE 11: Deploy Stack
+    # ========================================================================
+
+    - name: Start Grafana monitoring stack with Docker Compose
+      community.docker.docker_compose_v2:
+        project_src: "{{ grafana_config_dir }}"  # Where docker-compose.yml is located
+        state: present  # Ensure all services are running
+      become_user: a1   # Run as a1 user (who is in docker group)
+      # Why: Starts all monitoring services (Grafana, Prometheus, Loki, Alertmanager)
+
+    - name: Wait for Grafana to be ready
+      uri:
+        url: http://localhost:3000/api/health  # Grafana health endpoint
+        status_code: 200  # Expected response
+      register: result
+      until: result.status == 200
+      retries: 30  # Try 30 times
+      delay: 2     # Wait 2 seconds between retries (total: 60 seconds max)
+      # Why: Ensure Grafana is fully started before declaring success
+
+    # ========================================================================
+    # PHASE 12: Post-Installation Summary
+    # ========================================================================
+
+    - name: Display access information and next steps
+      debug:
+        msg:
+          - "=========================================="
+          - "🎉 Grafana Monitoring Stack Installation Complete!"
+          - "=========================================="
+          - ""
+          - "📊 Access URLs:"
+          - "  Grafana:       http://192.168.100.21:3000"
+          - "    Username: admin"
+          - "    Password: admin (⚠️  CHANGE THIS IMMEDIATELY!)"
+          - ""
+          - "  Prometheus:    http://192.168.100.21:9090"
+          - "  Alertmanager:  http://192.168.100.21:9093"
+          - "  Loki API:      http://192.168.100.21:3100"
+          - ""
+          - "📁 Configuration Files:"
+          - "  Base directory:  {{ grafana_config_dir }}"
+          - "  docker-compose:  {{ grafana_config_dir }}/docker-compose.yml"
+          - "  Prometheus:      {{ grafana_config_dir }}/prometheus.yml"
+          - "  Alertmanager:    {{ grafana_config_dir }}/alertmanager.yml"
+          - "  Alert rules:     {{ grafana_config_dir }}/prometheus-alerts/"
+          - ""
+          - "💾 Data Directories:"
+          - "  Prometheus:      {{ prometheus_data_dir }}"
+          - "  Loki:            {{ loki_data_dir }}"
+          - "  Grafana:         {{ grafana_data_dir }}"
+          - "  Alertmanager:    {{ alertmanager_data_dir }}"
+          - ""
+          - "🔔 Slack Alerts:"
+          - "  Channel: {{ slack_channel }}"
+          - "  ⚠️  UPDATE WEBHOOK URL in {{ grafana_config_dir }}/alertmanager.yml"
+          - "  Current: {{ slack_webhook_url }}"
+          - ""
+          - "📝 Next Steps:"
+          - "  1. ⚠️  CHANGE GRAFANA PASSWORD: http://192.168.100.21:3000"
+          - "  2. 🔗 UPDATE SLACK WEBHOOK: Edit alertmanager.yml with your webhook URL"
+          - "  3. 📦 INSTALL NODE_EXPORTER on VMs you want to monitor"
+          - "  4. 📊 IMPORT GRAFANA DASHBOARDS from grafana.com/dashboards:"
+          - "     - 1860: Node Exporter Full"
+          - "     - 13639: Prometheus Stats"
+          - "     - 15757: Kubernetes Views Global"
+          - "  5. ✏️  CONFIGURE PROMETHEUS TARGETS in {{ grafana_config_dir }}/prometheus.yml"
+          - "     (Uncomment K8s, AWS, DO sections and update IPs)"
+          - "  6. 🔄 RELOAD PROMETHEUS CONFIG: docker exec prometheus kill -HUP 1"
+          - ""
+          - "🧪 Test Alert:"
+          - "  # Trigger test alert to verify Slack integration"
+          - "  curl -X POST http://192.168.100.21:9093/api/v1/alerts -d '[{\"labels\":{\"alertname\":\"TestAlert\",\"severity\":\"warning\"},\"annotations\":{\"summary\":\"Test Alert\",\"description\":\"This is a test alert from Alertmanager\"}}]'"
+          - ""
+          - "🔧 Useful Commands:"
+          - "  View logs:        docker logs -f grafana"
+          - "  Restart stack:    cd {{ grafana_config_dir }} && docker compose restart"
+          - "  Stop stack:       cd {{ grafana_config_dir }} && docker compose down"
+          - "  Update stack:     cd {{ grafana_config_dir }} && docker compose pull && docker compose up -d"
+          - "=========================================="
+      # Why: Provide user with all necessary information to start using the stack

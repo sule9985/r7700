@@ -1,50 +1,63 @@
+# ============================================================================
+# Grafana Monitoring Server
+# ============================================================================
+# This component deploys a dedicated Grafana monitoring VM with Prometheus
+# and Loki for multi-platform infrastructure monitoring (K8s, AWS, DO).
+
 terraform {
+  required_version = ">= 1.0.0"
+
   required_providers {
     proxmox = {
       source  = "bpg/proxmox"
       version = "~> 0.86.0"
     }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.0"
+    }
   }
 }
 
-# ============================================================================
-# Provider Configuration
-# ============================================================================
+# Provider configuration
 provider "proxmox" {
-  endpoint  = var.proxmox_api_url
+  endpoint = var.proxmox_api_url
   api_token = var.proxmox_api_token_id
   insecure  = var.proxmox_tls_insecure
+
+  ssh {
+    agent = true
+  }
 }
 
-# ============================================================================
-# Data Sources
-# ============================================================================
+# SSH public key for VM access
 data "local_file" "ssh_public_key" {
   filename = pathexpand("~/.ssh/vm-deb13.pub")
 }
 
 # ============================================================================
-# RANCHER Server VM
+# Grafana Monitoring VM
 # ============================================================================
-module "k8s_rancher" {
+
+module "grafana" {
   source = "../../modules/vm"
 
   # VM identification
-  vm_name        = var.rancher_hostname
+  vm_name        = var.grafana_hostname
   target_node    = var.proxmox_node
-  vmid           = var.rancher_vm_id
+  vmid           = var.grafana_vm_id
   clone_template = var.template_id
   full_clone     = true
 
-  # Resources (configuration)
+  # Resources (moderate configuration for Grafana + Prometheus + Loki)
   cores  = 4
-  memory = 6144
+  memory = 4096  # 4GB in MB
 
   # Disk configuration
   disks = [{
     interface    = "scsi0"
     datastore_id = var.storage_name
-    size         = 60
+    size         = 80  # 60GB for Grafana, Prometheus, and Loki data
     file_format  = "raw"
   }]
 
@@ -56,7 +69,7 @@ module "k8s_rancher" {
 
   # Cloud-init configuration
   enable_cloud_init = true
-  ip_address        = "${var.rancher_ip}/24"
+  ip_address        = "${var.grafana_ip}/24"
   gateway           = var.gateway
   dns_servers       = var.dns_servers
 
@@ -66,5 +79,5 @@ module "k8s_rancher" {
 
   # Settings
   start_on_boot = true
-  tags          = "tf,k8s,rancher"
+  tags          = "monitoring,grafana"
 }

@@ -1,0 +1,12 @@
+# Proxmox API Configuration
+proxmox_api_url        = "https://proxmox:8006"
+proxmox_api_token_id   = "user@pam!terraform=secret-token-here"
+proxmox_tls_insecure   = true
+
+# Infrastructure
+target_node  = "pve"
+storage_name = "local-zfs"
+gateway      = "192.168.100.1"
+
+# OS Template (adjust path based on your Proxmox storage)
+ostemplate = "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"

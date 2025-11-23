@@ -7,10 +7,6 @@ terraform {
   }
 }
 
-data "local_file" "ssh_public_key" {
-  filename = "../../keys/vm-deb13.pub"
-}
-
 resource "proxmox_virtual_environment_vm" "vm" {
   name        = var.vm_name
   node_name   = var.target_node

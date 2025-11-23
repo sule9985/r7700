@@ -11,6 +11,21 @@ all:
         k8s-rancher:
           ansible_host: 192.168.100.20
 
+    grafana:
+      hosts:
+        grafana:
+          ansible_host: 192.168.100.21
+
+    jmeter:
+      hosts:
+        jmeter:
+          ansible_host: 192.168.100.23
+
+    grafana_stack:
+      hosts:
+        grafana-stack:
+          ansible_host: 192.168.100.40
+
     k8s_lb:
       hosts:
         k8s-lb:

@@ -1,0 +1,590 @@
+---
+# ============================================================================
+# Apache JMeter Load Testing Server Setup - Comprehensive Installation
+# ============================================================================
+# This playbook automates the complete setup of Apache JMeter including:
+# - OpenJDK 17: Java runtime required by JMeter
+# - Apache JMeter 5.6.3: Latest stable version (non-GUI mode)
+# - JMeter Prometheus Plugin: Exposes metrics for Grafana
+# - Directory structure: Test plans, results, reports
+# - Sample test configurations
+#
+# Target hosts: jmeter (192.168.100.23)
+# Prerequisites: Debian 13 VM with SSH access
+#
+# Usage:
+#   ansible-playbook jmeter-setup.yml
+#
+# Post-installation:
+#   - JMeter CLI:        /opt/jmeter/bin/jmeter
+#   - Test plans:        /opt/jmeter-tests/
+#   - Results:           /opt/jmeter-results/
+#   - HTML reports:      /opt/jmeter-reports/
+#   - Prometheus metrics: http://192.168.100.23:9270/metrics
+
+- name: Setup Apache JMeter Load Testing Server
+  hosts: jmeter  # Target the jmeter group from inventory.yml
+  become: true   # Run all tasks with sudo privileges
+
+  vars:
+    # === Version Configuration ===
+    # Using specific versions ensures reproducible deployments
+    jmeter_version: "5.6.3"                     # Latest JMeter stable (Dec 2024)
+    jmeter_prometheus_plugin_version: "0.6.0"   # Prometheus metrics plugin
+    java_package: "default-jdk"                 # Default Java package (uses latest available JDK)
+
+    # === Directory Structure ===
+    # Organized structure for JMeter installation and working directories
+    jmeter_install_dir: "/opt/jmeter"           # JMeter installation directory
+    jmeter_archive_dir: "/opt"                  # Where to download JMeter tarball
+    jmeter_tests_dir: "/opt/jmeter-tests"       # Test plan files (.jmx)
+    jmeter_results_dir: "/opt/jmeter-results"   # Test results (.jtl files)
+    jmeter_reports_dir: "/opt/jmeter-reports"   # HTML dashboard reports
+    jmeter_plugins_dir: "/opt/jmeter/lib/ext"   # JMeter plugins directory
+
+    # === Download URLs ===
+    jmeter_download_url: "https://dlcdn.apache.org/jmeter/binaries/apache-jmeter-{{ jmeter_version }}.tgz"
+    jmeter_prometheus_plugin_url: "https://repo1.maven.org/maven2/com/github/johrstrom/jmeter-prometheus-plugin/{{ jmeter_prometheus_plugin_version }}/jmeter-prometheus-plugin-{{ jmeter_prometheus_plugin_version }}.jar"
+
+  tasks:
+    # ========================================================================
+    # PHASE 1: System Preparation
+    # ========================================================================
+    # Update system and install required dependencies
+
+    - name: Update apt package cache
+      apt:
+        update_cache: yes           # Equivalent to 'apt update'
+        cache_valid_time: 3600      # Only update if cache is older than 1 hour
+      # Why: Ensures we get latest package information
+
+    - name: Install system prerequisites
+      apt:
+        name:
+          - curl                    # Download tool for fetching files
+          - wget                    # Alternative download tool
+          - tar                     # Extract compressed archives
+          - unzip                   # Extract zip files (for plugins)
+          - python3                 # Python for HTTP server (viewing reports)
+          - htop                    # System monitoring
+          - net-tools               # Network utilities
+          - ufw                     # Uncomplicated Firewall for port management
+        state: present              # Ensure packages are installed
+      # Why: These tools are needed for JMeter installation and operations
+
+    # ========================================================================
+    # PHASE 2: Java Installation
+    # ========================================================================
+    # JMeter requires Java Runtime Environment (JRE) version 8 or higher
+    # We install default-jdk which provides the latest available OpenJDK for Debian 13
+
+    - name: Install Java Development Kit (JMeter requirement)
+      apt:
+        name: "{{ java_package }}"
+        state: present
+      # Why: JMeter is a Java application and requires JVM to run
+      # default-jdk installs the latest OpenJDK version available in Debian repos
+
+    - name: Verify Java installation
+      command: java -version
+      register: java_version_output
+      changed_when: false           # This is a read-only check, doesn't change system
+      # Why: Confirm Java is properly installed before proceeding
+
+    - name: Display Java version
+      debug:
+        msg: "{{ java_version_output.stderr_lines }}"
+      # Why: Show installed Java version for verification
+
+    # ========================================================================
+    # PHASE 3: Download and Install Apache JMeter
+    # ========================================================================
+    # Download JMeter tarball and extract to /opt
+
+    # Check if JMeter is already installed to avoid re-downloading
+    - name: Check if JMeter is already installed
+      stat:
+        path: "{{ jmeter_install_dir }}/bin/jmeter"
+      register: jmeter_binary
+      # Why: Skip download if already installed (idempotent)
+
+    # Download JMeter tarball (only if not already installed)
+    - name: Download Apache JMeter {{ jmeter_version }}
+      get_url:
+        url: "{{ jmeter_download_url }}"
+        dest: "{{ jmeter_archive_dir }}/apache-jmeter-{{ jmeter_version }}.tgz"
+        mode: '0644'
+        timeout: 300                # 5 minutes timeout for download
+      when: not jmeter_binary.stat.exists
+      # Why: Downloads official JMeter binary from Apache mirror
+      # Only downloads if not already present (saves bandwidth and time)
+
+    # Extract JMeter tarball
+    - name: Extract JMeter archive
+      unarchive:
+        src: "{{ jmeter_archive_dir }}/apache-jmeter-{{ jmeter_version }}.tgz"
+        dest: "{{ jmeter_archive_dir }}"
+        remote_src: yes             # File is already on remote server
+        creates: "{{ jmeter_archive_dir }}/apache-jmeter-{{ jmeter_version }}"
+      when: not jmeter_binary.stat.exists
+      # Why: Extracts JMeter files to /opt/apache-jmeter-5.6.3/
+      # creates: parameter makes task idempotent (won't re-extract if already done)
+
+    # Create symlink for easier access
+    - name: Create symlink to JMeter installation
+      file:
+        src: "{{ jmeter_archive_dir }}/apache-jmeter-{{ jmeter_version }}"
+        dest: "{{ jmeter_install_dir }}"
+        state: link
+      when: not jmeter_binary.stat.exists
+      # Why: Creates /opt/jmeter -> /opt/apache-jmeter-5.6.3
+      # Makes it easy to reference JMeter without version number
+
+    # Make JMeter binaries executable and set proper ownership
+    - name: Make JMeter scripts executable
+      file:
+        path: "{{ jmeter_install_dir }}/bin/{{ item }}"
+        mode: '0755'                # rwxr-xr-x (executable by all)
+      loop:
+        - jmeter                    # Main JMeter CLI script
+        - jmeter-server             # JMeter server for distributed testing
+      # Why: Ensure JMeter scripts can be executed
+
+    - name: Set ownership of JMeter directory to a1 user
+      file:
+        path: "{{ jmeter_install_dir }}"
+        owner: a1
+        group: a1
+        recurse: yes
+      # Why: Allow a1 user to write logs and manage JMeter files
+      # JMeter creates jmeter.log in bin/ directory during execution
+
+    # ========================================================================
+    # PHASE 4: Configure JMeter PATH
+    # ========================================================================
+    # Add JMeter to system PATH so it can be run from anywhere
+
+    - name: Add JMeter to system PATH
+      copy:
+        dest: /etc/profile.d/jmeter.sh
+        content: |
+          # Apache JMeter PATH configuration
+          export JMETER_HOME={{ jmeter_install_dir }}
+          export PATH=$PATH:{{ jmeter_install_dir }}/bin
+        mode: '0644'
+      # Why: Makes 'jmeter' command available globally
+      # /etc/profile.d/ scripts are sourced on login for all users
+
+    - name: Source JMeter PATH for current session
+      shell: source /etc/profile.d/jmeter.sh
+      args:
+        executable: /bin/bash
+      changed_when: false
+      # Why: Apply PATH changes immediately without logout/login
+
+    # ========================================================================
+    # PHASE 5: JMeter JVM Tuning
+    # ========================================================================
+    # Optimize JMeter JVM settings for 5000 concurrent users with 32GB RAM
+
+    - name: Configure JMeter JVM heap size
+      lineinfile:
+        path: "{{ jmeter_install_dir }}/bin/jmeter"
+        regexp: '^HEAP='
+        line: 'HEAP="-Xms16g -Xmx24g -XX:MaxMetaspaceSize=1g"'
+        backup: yes
+      # Why: Allocate large memory for 5000 concurrent users
+      # -Xms16g: Initial heap size 16GB (prevents resizing during test)
+      # -Xmx24g: Maximum heap size 24GB (leaves 8GB for OS and buffers)
+      # -XX:MaxMetaspaceSize=1g: Increased metadata memory for large tests
+
+    - name: Configure JMeter garbage collection
+      lineinfile:
+        path: "{{ jmeter_install_dir }}/bin/jmeter"
+        regexp: '^GC_ALGO='
+        line: 'GC_ALGO="-XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=35"'
+        backup: yes
+      # Why: Use G1GC optimized for large heap (24GB) with 5000 users
+      # -XX:+UseG1GC: Enable G1 collector (best for heaps > 8GB)
+      # -XX:MaxGCPauseMillis=100: Target max pause time of 100ms
+      # -XX:G1ReservePercent=20: Reserve 20% heap to prevent full GC
+      # -XX:InitiatingHeapOccupancyPercent=35: Start concurrent GC earlier for large heaps
+
+    # Suppress Log4j2 package scanning deprecation warnings
+    - name: Disable Log4j2 package scanning in jmeter.properties
+      lineinfile:
+        path: "{{ jmeter_install_dir }}/bin/jmeter.properties"
+        regexp: '^#?log4j2.enable.threadlocals='
+        line: 'log4j2.enable.threadlocals=true'
+        backup: yes
+      # Why: Enables thread locals to reduce Log4j2 warnings
+      # This is a recommended performance setting that also reduces warning noise
+
+    - name: Suppress Log4j2 status logger output
+      lineinfile:
+        path: "{{ jmeter_install_dir }}/bin/jmeter.properties"
+        regexp: '^#?log4j2.status.logger.level='
+        line: 'log4j2.status.logger.level=ERROR'
+        backup: yes
+      # Why: Set Log4j2 internal status logger to ERROR level
+      # This suppresses WARN messages about package scanning deprecation
+      # Only critical Log4j2 configuration errors will be shown
+
+    # ========================================================================
+    # PHASE 6: Install JMeter Prometheus Plugin
+    # ========================================================================
+    # This plugin exposes JMeter metrics in Prometheus format for Grafana
+
+    - name: Create JMeter plugins directory
+      file:
+        path: "{{ jmeter_plugins_dir }}"
+        state: directory
+        mode: '0755'
+      # Why: Ensure plugin directory exists
+
+    - name: Download JMeter Prometheus plugin
+      get_url:
+        url: "{{ jmeter_prometheus_plugin_url }}"
+        dest: "{{ jmeter_plugins_dir }}/jmeter-prometheus-plugin-{{ jmeter_prometheus_plugin_version }}.jar"
+        mode: '0644'
+      # Why: Enables real-time metrics export to Prometheus/Grafana
+      # Metrics exposed at http://192.168.100.23:9270/metrics
+
+    - name: Configure Prometheus plugin port (optional)
+      lineinfile:
+        path: "{{ jmeter_install_dir }}/bin/user.properties"
+        line: "prometheus.port=9270"
+        create: yes
+      # Why: Set custom port for Prometheus metrics endpoint
+      # Default is 9270, explicitly configured for clarity
+
+    # ========================================================================
+    # PHASE 7: Create Working Directories
+    # ========================================================================
+    # Organized directory structure for test plans, results, and reports
+
+    - name: Create JMeter working directories
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: a1                   # Owned by a1 user
+        group: a1                   # Owned by a1 group
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ jmeter_tests_dir }}", mode: "0755" }      # Test plans (.jmx files)
+        - { path: "{{ jmeter_results_dir }}", mode: "0755" }    # Results (.jtl files)
+        - { path: "{{ jmeter_reports_dir }}", mode: "0755" }    # HTML reports
+      # Why: Organized structure for storing JMeter files
+      # Separates test plans, results, and reports for better management
+
+    # ========================================================================
+    # PHASE 8: Create Sample Test Plans
+    # ========================================================================
+    # Create example test plans for quick testing
+
+    - name: Create sample HTTP test plan
+      copy:
+        dest: "{{ jmeter_tests_dir }}/sample-http-test.jmx"
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <jmeterTestPlan version="1.2" properties="5.0" jmeter="{{ jmeter_version }}">
+            <hashTree>
+              <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Sample HTTP Load Test">
+                <stringProp name="TestPlan.comments">Simple HTTP load test example</stringProp>
+                <elementProp name="TestPlan.user_defined_variables" elementType="Arguments">
+                  <collectionProp name="Arguments.arguments"/>
+                </elementProp>
+              </TestPlan>
+              <hashTree>
+                <!-- Thread Group: Simulates users -->
+                <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users">
+                  <stringProp name="ThreadGroup.num_threads">${__P(users,10)}</stringProp>
+                  <stringProp name="ThreadGroup.ramp_time">${__P(rampup,30)}</stringProp>
+                  <stringProp name="ThreadGroup.duration">${__P(duration,60)}</stringProp>
+                  <boolProp name="ThreadGroup.scheduler">true</boolProp>
+                  <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+                </ThreadGroup>
+                <hashTree>
+                  <!-- HTTP Request -->
+                  <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="HTTP Request">
+                    <stringProp name="HTTPSampler.domain">${__P(target,example.com)}</stringProp>
+                    <stringProp name="HTTPSampler.port">80</stringProp>
+                    <stringProp name="HTTPSampler.protocol">http</stringProp>
+                    <stringProp name="HTTPSampler.path">/</stringProp>
+                    <stringProp name="HTTPSampler.method">GET</stringProp>
+                  </HTTPSamplerProxy>
+                  <hashTree/>
+                </hashTree>
+              </hashTree>
+            </hashTree>
+          </jmeterTestPlan>
+        owner: a1
+        group: a1
+        mode: '0644'
+      # Why: Provides ready-to-use example for testing
+      # Can be run immediately after installation
+
+    # ========================================================================
+    # PHASE 9: Create Helper Scripts
+    # ========================================================================
+    # Useful scripts for common JMeter operations
+
+    - name: Create JMeter test runner script
+      copy:
+        dest: /usr/local/bin/jmeter-run
+        content: |
+          #!/bin/bash
+          # JMeter Test Runner Helper Script
+          # Usage: jmeter-run <test-plan.jmx> [users] [duration]
+
+          set -e
+
+          # Check arguments
+          if [ $# -lt 1 ]; then
+            echo "Usage: jmeter-run <test-plan.jmx> [users] [duration]"
+            echo "Example: jmeter-run my-test.jmx 100 300"
+            exit 1
+          fi
+
+          TEST_PLAN="$1"
+          USERS="${2:-10}"        # Default 10 users
+          DURATION="${3:-60}"     # Default 60 seconds
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+          # Create result and report directories
+          RESULT_FILE="{{ jmeter_results_dir }}/results-${TIMESTAMP}.jtl"
+          REPORT_DIR="{{ jmeter_reports_dir }}/report-${TIMESTAMP}"
+
+          echo "=========================================="
+          echo "JMeter Load Test"
+          echo "=========================================="
+          echo "Test Plan: $TEST_PLAN"
+          echo "Users: $USERS"
+          echo "Duration: ${DURATION}s"
+          echo "Results: $RESULT_FILE"
+          echo "Report: $REPORT_DIR"
+          echo "=========================================="
+
+          # Run JMeter test
+          {{ jmeter_install_dir }}/bin/jmeter -n \
+            -t "$TEST_PLAN" \
+            -l "$RESULT_FILE" \
+            -e -o "$REPORT_DIR" \
+            -Jusers=$USERS \
+            -Jduration=$DURATION
+
+          echo "=========================================="
+          echo "Test completed!"
+          echo "View report: cd $REPORT_DIR && python3 -m http.server 8080"
+          echo "=========================================="
+        owner: root
+        group: root
+        mode: '0755'
+      # Why: Simplified wrapper script for running tests
+      # Automatically generates timestamped results and reports
+
+    # ========================================================================
+    # PHASE 10: Firewall Configuration
+    # ========================================================================
+    # Open port for Prometheus metrics
+
+    - name: Configure UFW to allow SSH
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+      # Why: Keep SSH access open
+
+    - name: Allow Prometheus metrics port
+      ufw:
+        rule: allow
+        port: '9270'
+        proto: tcp
+        comment: 'JMeter Prometheus Metrics'
+      # Why: Allow Prometheus on Grafana server to scrape metrics
+
+    - name: Allow HTTP port for viewing reports
+      ufw:
+        rule: allow
+        port: '8080'
+        proto: tcp
+        comment: 'JMeter HTML Reports'
+      # Why: Allows accessing HTML reports via Python HTTP server
+
+    - name: Enable UFW firewall
+      ufw:
+        state: enabled
+      # Why: Activate firewall rules
+
+    # ========================================================================
+    # PHASE 10b: System Tuning for 5000 Concurrent Users
+    # ========================================================================
+    # Tune kernel parameters to handle large number of concurrent connections
+
+    - name: Increase maximum number of open files system-wide
+      sysctl:
+        name: fs.file-max
+        value: '2097152'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      # Why: Allow system to handle many concurrent file descriptors
+      # Default ~65k is too low for 5000 concurrent connections
+
+    - name: Increase ephemeral port range
+      sysctl:
+        name: net.ipv4.ip_local_port_range
+        value: '1024 65535'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      # Why: More available ports for outbound connections
+      # 5000 users need many simultaneous connections
+
+    - name: Enable TCP socket reuse for TIME_WAIT connections
+      sysctl:
+        name: net.ipv4.tcp_tw_reuse
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      # Why: Reuse sockets in TIME_WAIT state for new connections
+      # Critical for high-frequency request generation
+
+    - name: Increase TCP maximum SYN backlog
+      sysctl:
+        name: net.ipv4.tcp_max_syn_backlog
+        value: '8192'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      # Why: Handle burst of new connections when ramping up users
+
+    - name: Increase network receive buffer size
+      sysctl:
+        name: net.core.rmem_max
+        value: '16777216'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      # Why: Larger buffer for receiving responses from target systems
+
+    - name: Increase network send buffer size
+      sysctl:
+        name: net.core.wmem_max
+        value: '16777216'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      # Why: Larger buffer for sending requests to target systems
+
+    - name: Set user file descriptor limits for a1 user
+      pam_limits:
+        domain: a1
+        limit_type: '-'
+        limit_item: nofile
+        value: '1048576'
+      # Why: Allow a1 user to open up to 1M files (needed for 5000+ connections)
+
+    - name: Set user process limits for a1 user
+      pam_limits:
+        domain: a1
+        limit_type: '-'
+        limit_item: nproc
+        value: '65536'
+      # Why: Allow many processes/threads (JMeter creates threads per user)
+
+    # ========================================================================
+    # PHASE 11: Verify Installation
+    # ========================================================================
+
+    - name: Verify JMeter installation
+      command: "{{ jmeter_install_dir }}/bin/jmeter --version"
+      register: jmeter_version_output
+      changed_when: false
+      # Why: Confirm JMeter is properly installed
+
+    - name: Display JMeter version
+      debug:
+        msg: "{{ jmeter_version_output.stdout_lines }}"
+      # Why: Show installed JMeter version
+
+    # ========================================================================
+    # PHASE 12: Post-Installation Information
+    # ========================================================================
+
+    - name: Display installation summary and next steps
+      debug:
+        msg:
+          - "=========================================="
+          - "🎉 Apache JMeter Installation Complete!"
+          - "=========================================="
+          - ""
+          - "📊 JMeter Information:"
+          - "  Version:        Apache JMeter {{ jmeter_version }}"
+          - "  Java Package:   {{ java_package }}"
+          - "  Installation:   {{ jmeter_install_dir }}"
+          - ""
+          - "📁 Working Directories:"
+          - "  Test plans:     {{ jmeter_tests_dir }}"
+          - "  Results:        {{ jmeter_results_dir }}"
+          - "  HTML reports:   {{ jmeter_reports_dir }}"
+          - ""
+          - "🔧 JVM Configuration (Optimized for 5000 Users):"
+          - "  Heap Size:      16GB - 24GB"
+          - "  GC Algorithm:   G1GC (optimized for large heaps)"
+          - "  Max Capacity:   Up to 5000 concurrent users"
+          - ""
+          - "⚡ System Tuning Applied:"
+          - "  Max Open Files: 1,048,576"
+          - "  TCP Ports:      1024-65535 (64,511 available)"
+          - "  Socket Reuse:   Enabled (TIME_WAIT optimization)"
+          - "  Network Buffers: 16MB send/receive"
+          - ""
+          - "📈 Prometheus Metrics:"
+          - "  Endpoint:       http://192.168.100.23:9270/metrics"
+          - "  Plugin:         jmeter-prometheus-plugin v{{ jmeter_prometheus_plugin_version }}"
+          - ""
+          - "🚀 Quick Start Commands:"
+          - "  # Check version"
+          - "  jmeter --version"
+          - ""
+          - "  # Run small test (10 users, 60 seconds)"
+          - "  jmeter -n -t {{ jmeter_tests_dir }}/sample-http-test.jmx -l {{ jmeter_results_dir }}/results.jtl"
+          - ""
+          - "  # Run medium load test (500 users, 5 minutes)"
+          - "  jmeter-run {{ jmeter_tests_dir }}/sample-http-test.jmx 500 300"
+          - ""
+          - "  # Run high load test (5000 users, 30 minutes)"
+          - "  jmeter -n -t test.jmx -l results.jtl -Jusers=5000 -Jrampup=600 -Jduration=1800"
+          - ""
+          - "📊 View HTML Reports:"
+          - "  cd {{ jmeter_reports_dir }}/report-*"
+          - "  python3 -m http.server 8080"
+          - "  # Access at http://192.168.100.23:8080"
+          - ""
+          - "🔗 Grafana Integration:"
+          - "  1. Add to Prometheus scrape config (on Grafana server):"
+          - "     - job_name: 'jmeter'"
+          - "       static_configs:"
+          - "         - targets: ['192.168.100.23:9270']"
+          - ""
+          - "  2. Reload Prometheus:"
+          - "     docker exec prometheus kill -HUP 1"
+          - ""
+          - "  3. Import JMeter dashboard in Grafana"
+          - ""
+          - "📝 Next Steps:"
+          - "  1. Create test plans with JMeter GUI (on your desktop)"
+          - "  2. Upload .jmx files to {{ jmeter_tests_dir }}/"
+          - "  3. Run tests with: jmeter-run <test-plan.jmx> <users> <duration>"
+          - "  4. Monitor in real-time via Grafana"
+          - "  5. Analyze HTML reports after test completion"
+          - ""
+          - "📚 Useful Resources:"
+          - "  JMeter Docs:    https://jmeter.apache.org/usermanual/"
+          - "  Best Practices: https://jmeter.apache.org/usermanual/best-practices.html"
+          - "  Sample Tests:   {{ jmeter_tests_dir }}/sample-http-test.jmx"
+          - ""
+          - "=========================================="
+      # Why: Provide complete information for using JMeter
